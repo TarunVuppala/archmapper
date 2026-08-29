@@ -1,0 +1,51 @@
+{
+  "name": "archmap",
+  "version": "0.1.0",
+  "description": "Architecture Mapper - one knowledge graph for your codebase",
+  "type": "module",
+  "bin": {
+    "archmap": "dist/cli/index.js"
+  },
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "main": "dist/core/index.js",
+  "types": "dist/core/index.d.ts",
+  "exports": {
+    ".": "./dist/core/index.js",
+    "./core": "./dist/core/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "dev": "node --import tsx src/cli/index.ts"
+  },
+  "keywords": [
+    "architecture",
+    "codebase",
+    "impact-analysis",
+    "knowledge-graph",
+    "blast-radius",
+    "dependency-graph"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "dependencies": {
+    "commander": "^12.0.0",
+    "glob": "^10.0.0",
+    "js-yaml": "^4.1.0",
+    "tsx": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
