@@ -28,28 +28,29 @@ function getHTML(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Architecture Mapper — Neon Codeflow Suite</title>
+  <title>Archmap — Portfolio Brutalist Suite</title>
+  <!-- Google Display Fonts -->
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@700;900&family=Oswald:wght@500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   <!-- D3 Engine -->
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <style>
     :root {
-      --bg-deep: #050508;
-      --bg-panel: #0b0c13;
-      --bg-panel-hover: #151724;
-      --border-glow: #1e2235;
-      --border-active: #ffffff;
-      --text-main: #f1f3f9;
-      --text-muted: #7e849e;
-      --primary: #5ca0ff;
-      --accent-purple: #c084fc;
-      --accent-green: #34d399;
-      --accent-amber: #fbbf24;
-      --accent-coral: #f87171;
+      --bg-deep: #000000;
+      --bg-panel: #060608;
+      --bg-panel-hover: #111115;
+      --border-glow: #1c1817;
+      --border-active: #ca3e1c;
+      --text-main: #fcfaf7;
+      --text-muted: #8e8883;
+      --primary: #ca3e1c;
+      --accent-purple: #6b21a8;
+      --accent-beige: #ebdcb9;
+      --accent-maroon: #872341;
     }
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
       background: var(--bg-deep);
       color: var(--text-main);
       overflow: hidden;
@@ -72,14 +73,14 @@ function getHTML(): string {
       flex-direction: column;
       gap: 16px;
       z-index: 10;
-      box-shadow: 10px 0 30px rgba(0,0,0,0.8);
+      box-shadow: 10px 0 30px rgba(0,0,0,0.95);
     }
 
     /* Main visualizer canvas */
     #graph-container {
       flex: 1;
       position: relative;
-      background: radial-gradient(circle at center, #0e111d 0%, #030305 100%);
+      background: radial-gradient(circle at center, #130604 0%, #000000 100%);
     }
 
     svg#visualizer {
@@ -95,7 +96,7 @@ function getHTML(): string {
       top: 0;
       bottom: 0;
       width: 400px;
-      background: rgba(11, 12, 19, 0.96);
+      background: rgba(6, 6, 8, 0.98);
       backdrop-filter: blur(20px);
       border-left: 1px solid var(--border-glow);
       padding: 28px;
@@ -103,23 +104,24 @@ function getHTML(): string {
       transform: translateX(100%);
       transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
       z-index: 20;
-      box-shadow: -10px 0 30px rgba(0,0,0,0.8);
+      box-shadow: -10px 0 30px rgba(0,0,0,0.95);
     }
     #detail-panel.open {
       transform: translateX(0);
     }
 
     h1.brand {
-      font-size: 19px;
-      font-weight: 800;
+      font-family: 'Cinzel Decorative', serif;
+      font-size: 21px;
+      font-weight: 900;
       letter-spacing: 0.5px;
       color: #fff;
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 10px;
     }
     h1.brand span {
-      background: linear-gradient(135deg, #60a5fa, #c084fc);
+      background: linear-gradient(135deg, #ca3e1c, #ec6e4c);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
     }
@@ -131,18 +133,19 @@ function getHTML(): string {
     }
     .stat {
       background: var(--bg-panel-hover);
-      border: 1px solid rgba(255, 255, 255, 0.02);
+      border: 1px solid rgba(202, 62, 28, 0.05);
       padding: 12px;
       border-radius: 6px;
       transition: transform 0.2s, border-color 0.2s;
     }
     .stat:hover {
       transform: translateY(-2px);
-      border-color: #3b82f6;
+      border-color: var(--primary);
     }
     .stat-value {
-      font-size: 22px;
-      font-weight: 800;
+      font-family: 'Oswald', sans-serif;
+      font-size: 24px;
+      font-weight: 700;
       color: #fff;
     }
     .stat-label {
@@ -157,6 +160,7 @@ function getHTML(): string {
       position: relative;
     }
     .search {
+      font-family: 'Plus Jakarta Sans', sans-serif;
       width: 100%;
       padding: 12px 16px;
       background: var(--bg-panel-hover);
@@ -169,7 +173,7 @@ function getHTML(): string {
     }
     .search:focus {
       border-color: var(--primary);
-      box-shadow: 0 0 12px rgba(96, 165, 250, 0.2);
+      box-shadow: 0 0 12px rgba(202, 62, 28, 0.2);
     }
 
     /* Dynamic Tabs Bar */
@@ -179,15 +183,16 @@ function getHTML(): string {
       background: rgba(255,255,255,0.01);
       padding: 4px;
       border-radius: 6px;
-      border: 1px solid rgba(255,255,255,0.03);
+      border: 1px solid rgba(202,62,28,0.05);
       gap: 4px;
     }
     .tab {
+      font-family: 'Oswald', sans-serif;
       flex: 1 1 auto;
       padding: 6px 8px;
       border-radius: 4px;
       cursor: pointer;
-      font-size: 10px;
+      font-size: 11px;
       font-weight: 600;
       background: transparent;
       border: none;
@@ -195,11 +200,13 @@ function getHTML(): string {
       text-transform: uppercase;
       transition: all 0.2s;
       text-align: center;
+      letter-spacing: 0.5px;
     }
     .tab.active {
       background: var(--bg-panel-hover);
-      color: #fff;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+      color: var(--primary);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.8);
+      font-weight: 700;
     }
 
     /* List styling */
@@ -223,11 +230,11 @@ function getHTML(): string {
     }
     .node-item:hover {
       background: var(--bg-panel-hover);
-      border-color: #31354a;
+      border-color: #3d1c13;
       transform: translateX(4px);
     }
     .node-item.selected {
-      background: rgba(96, 165, 250, 0.08);
+      background: rgba(202, 62, 28, 0.08);
       border-color: var(--primary);
     }
 
@@ -246,12 +253,16 @@ function getHTML(): string {
       white-space: nowrap;
     }
     .node-kind-badge {
+      font-family: 'Oswald', sans-serif;
       font-size: 9px;
       font-weight: 700;
       padding: 3px 6px;
       border-radius: 3px;
       text-transform: uppercase;
       letter-spacing: 0.5px;
+      background: rgba(255,255,255,0.04);
+      color: #d4cfc9;
+      border: 1px solid rgba(255,255,255,0.08);
     }
     .node-path-row {
       font-size: 11px;
@@ -261,60 +272,46 @@ function getHTML(): string {
       text-overflow: ellipsis;
     }
 
-    /* Semantic Neon Kinds Badges */
-    .badge-Function, .badge-Method { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.2); }
-    .badge-Class { background: rgba(192, 132, 252, 0.15); color: #c084fc; border: 1px solid rgba(192, 132, 252, 0.2); }
-    .badge-Interface { background: rgba(139, 92, 246, 0.15); color: #a78bfa; border: 1px solid rgba(139, 92, 246, 0.2); }
-    .badge-Table { background: rgba(251, 191, 36, 0.15); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.2); }
-    .badge-API { background: rgba(52, 211, 153, 0.15); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.2); }
-    .badge-File { background: rgba(71, 85, 105, 0.15); color: #94a3b8; border: 1px solid rgba(71, 85, 105, 0.2); }
-    .badge-External { background: rgba(248, 113, 113, 0.15); color: #f87171; border: 1px solid rgba(248, 113, 113, 0.2); }
-    .badge-Test { background: rgba(30, 150, 200, 0.15); color: #38bdf8; border: 1px solid rgba(30, 150, 200, 0.2); }
-
-    /* Semantic Colored Directed Links */
+    /* All links are pure white and greyish monochrome shades (enhanced visibility) */
     .link {
+      stroke: rgba(255, 255, 255, 0.22);
+      stroke-width: 1.5px;
       fill: none;
       transition: stroke 0.3s, stroke-width 0.3s, stroke-opacity 0.3s;
       cursor: pointer;
     }
-    
-    /* Edge Semantic Colors */
     .link.type-CONTAINS {
-      stroke: #1e202f;
+      stroke: rgba(255, 255, 255, 0.08);
       stroke-width: 1px;
       stroke-dasharray: 2 2;
     }
     .link.type-CALLS {
-      stroke: rgba(96, 165, 250, 0.25);
-      stroke-width: 1.5px;
+      stroke: rgba(255, 255, 255, 0.32);
     }
     .link.type-IMPORTS {
-      stroke: rgba(167, 139, 250, 0.35);
-      stroke-width: 1.2px;
-      stroke-dasharray: 4 2;
+      stroke: rgba(255, 255, 255, 0.18);
+      stroke-dasharray: 3 3;
     }
     .link.type-EXPOSES {
-      stroke: rgba(52, 211, 153, 0.35);
-      stroke-width: 2px;
+      stroke: rgba(255, 255, 255, 0.35);
       stroke-dasharray: 4 4;
     }
     .link.type-READS, .link.type-WRITES {
-      stroke: rgba(251, 191, 36, 0.3);
-      stroke-width: 1.8px;
+      stroke: rgba(255, 255, 255, 0.26);
     }
 
-    /* Edge Highlights */
-    .link.type-CONTAINS.highlight { stroke: #4b5563; stroke-width: 1.2px; }
-    .link.type-CALLS.highlight { stroke: #60a5fa; stroke-width: 3px; stroke-opacity: 0.95; }
-    .link.type-IMPORTS.highlight { stroke: #c084fc; stroke-width: 2.2px; stroke-opacity: 0.95; }
-    .link.type-EXPOSES.highlight { stroke: #34d399; stroke-width: 3px; stroke-opacity: 0.95; }
-    .link.type-READS.highlight, .link.type-WRITES.highlight { stroke: #fbbf24; stroke-width: 2.5px; stroke-opacity: 0.95; }
+    /* Solid bright white highlighted link */
+    .link.highlight {
+      stroke: #ffffff !important;
+      stroke-width: 2.5px !important;
+      stroke-opacity: 0.95 !important;
+    }
 
     .link.fade {
       stroke-opacity: 0.02 !important;
     }
 
-    /* Nodes layout and animations */
+    /* Shapes base animations and states */
     .node-g {
       cursor: grab;
       transition: opacity 0.3s;
@@ -322,11 +319,12 @@ function getHTML(): string {
     .node-g:active {
       cursor: grabbing;
     }
-    .node-circle {
+    
+    .node-shape {
       stroke-width: 1.5px;
-      transition: r 0.3s, stroke-width 0.3s, fill 0.3s, stroke 0.3s;
+      transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275), stroke-width 0.3s, fill 0.3s, stroke 0.3s;
     }
-    .node-circle.highlight {
+    .node-shape.highlight {
       stroke-width: 3.5px;
     }
     .node-g.fade {
@@ -378,7 +376,7 @@ function getHTML(): string {
     }
 
     .signature-box {
-      background: rgba(0,0,0,0.5);
+      background: rgba(0,0,0,0.6);
       border: 1px solid var(--border-glow);
       border-radius: 6px;
       padding: 12px;
@@ -402,9 +400,9 @@ function getHTML(): string {
       margin: 3px;
     }
     .risk-critical { background: rgba(248, 113, 113, 0.1); color: #f87171; border: 1px solid rgba(248, 113, 113, 0.2); }
-    .risk-untested { background: rgba(251, 191, 36, 0.1); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.2); }
-    .risk-db_write { background: rgba(52, 211, 153, 0.1); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.2); }
-    .risk-external { background: rgba(167, 139, 250, 0.1); color: #a78bfa; border: 1px solid rgba(167, 139, 250, 0.2); }
+    .risk-untested { background: rgba(202, 62, 28, 0.1); color: #ca3e1c; border: 1px solid rgba(202, 62, 28, 0.2); }
+    .risk-db_write { background: rgba(235, 220, 185, 0.1); color: #ebdcb9; border: 1px solid rgba(235, 220, 185, 0.2); }
+    .risk-external { background: rgba(107, 33, 168, 0.1); color: #a78bfa; border: 1px solid rgba(107, 33, 168, 0.2); }
 
     /* Flow step / why-path styling */
     .why-path {
@@ -439,12 +437,13 @@ function getHTML(): string {
     }
     .neighbor-item:hover {
       background: var(--bg-panel-hover);
-      border-color: #31354a;
+      border-color: #551c11;
       transform: translateX(4px);
     }
 
     /* Edge animated flows */
     .pulse-dot {
+      fill: #ffffff;
       filter: url(#glow-pulse);
     }
 
@@ -464,11 +463,11 @@ function getHTML(): string {
       background: transparent;
     }
     ::-webkit-scrollbar-thumb {
-      background: var(--border-glow);
+      background: #3a1610;
       border-radius: 10px;
     }
     ::-webkit-scrollbar-thumb:hover {
-      background: rgba(255, 255, 255, 0.08);
+      background: var(--primary);
     }
   </style>
 </head>
@@ -522,47 +521,47 @@ function getHTML(): string {
             </feMerge>
           </filter>
           
-          <!-- Semantic Directional Markers -->
+          <!-- Monochrome Directional Markers -->
           <marker id="arrow-CONTAINS" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#1e202f" />
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="rgba(255,255,255,0.04)" />
           </marker>
           <marker id="arrow-CONTAINS-highlight" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#4b5563" />
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#ffffff" />
           </marker>
 
           <marker id="arrow-CALLS" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#3b82f6" fill-opacity="0.5" />
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="rgba(255,255,255,0.12)" />
           </marker>
           <marker id="arrow-CALLS-highlight" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#60a5fa" />
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#ffffff" />
           </marker>
 
           <marker id="arrow-IMPORTS" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#8b5cf6" fill-opacity="0.5" />
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="rgba(255,255,255,0.07)" />
           </marker>
           <marker id="arrow-IMPORTS-highlight" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#c084fc" />
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#ffffff" />
           </marker>
 
           <marker id="arrow-EXPOSES" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#10b981" fill-opacity="0.5" />
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="rgba(255,255,255,0.14)" />
           </marker>
           <marker id="arrow-EXPOSES-highlight" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#34d399" />
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#ffffff" />
           </marker>
 
           <marker id="arrow-READS" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#f59e0b" fill-opacity="0.5" />
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="rgba(255,255,255,0.1)" />
           </marker>
           <marker id="arrow-READS-highlight" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#fbbf24" />
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#ffffff" />
           </marker>
 
           <marker id="arrow-WRITES" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#f59e0b" fill-opacity="0.5" />
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="rgba(255,255,255,0.1)" />
           </marker>
           <marker id="arrow-WRITES-highlight" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#fbbf24" />
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#ffffff" />
           </marker>
         </defs>
         
@@ -583,36 +582,25 @@ function getHTML(): string {
   </div>
 
   <script>
-    // Colorful semantic configuration details
-    const kindColors = {
-      Function: '#60a5fa',   // Blue
-      Method: '#3b82f6',     // Indigo Blue
-      Class: '#c084fc',      // Amethyst Purple
-      Interface: '#a78bfa',  // Violet Lavender
-      Table: '#fbbf24',      // Amber Yellow
-      API: '#34d399',        // Emerald Green
-      File: '#94a3b8',       // Slate Gray
-      External: '#f87171',   // Warm Coral Red
-      Test: '#38bdf8',       // Sky Blue
-      Module: '#818cf8',     // Pastel Purple
-      Repo: '#ffffff'
-    };
-
-    // Edge type Colors
-    const edgeColors = {
-      CONTAINS: '#1e202f',
-      CALLS: '#60a5fa',
-      IMPORTS: '#c084fc',
-      EXPOSES: '#34d399',
-      READS: '#fbbf24',
-      WRITES: '#fbbf24'
-    };
+    // Complementary Base Palette for Directory-Tree Coloring (terracotta orange, deep purple, earthy beige, maroon #872341)
+    const treePalette = [
+      '#ca3e1c', // Burnt Terracotta Orange
+      '#4a148c', // Deep Purple
+      '#ebdcb9', // Earthy Beige
+      '#872341', // Crimson Maroon
+      '#f43f5e', // Warm Rose Red
+      '#78716c', // Stone Sand Grey
+      '#0284c7'  // Sky Blue
+    ];
 
     let allNodes = [];
     let allEdges = [];
     let selectedNode = null;
     let hoveredNode = null;
     let currentView = 'all';
+
+    // Map each unique subdirectory directory tree to a base color
+    let directoryColorMap = {};
 
     // D3 Elements
     const svg = d3.select("svg#visualizer");
@@ -635,7 +623,10 @@ function getHTML(): string {
         document.getElementById('stat-nodes').textContent = allNodes.length;
         document.getElementById('stat-edges').textContent = allEdges.length;
 
-        // 2. Generate categories tabs dynamically based ONLY on kinds present in the repo
+        // 2. Map directories to base colors
+        initDirectoryTreeColors();
+
+        // 3. Generate categories tabs dynamically based ONLY on kinds present in the repo
         buildDynamicTabs();
 
         // Jitter & coordinate safety: ensure nodes have valid x and y coords initially
@@ -662,7 +653,7 @@ function getHTML(): string {
           return nodeIds.has(fromId) && nodeIds.has(toId);
         });
 
-        // 3. Set up swipe panning / zooming using D3 zoom
+        // Set up swipe panning / zooming using D3 zoom
         zoomBehavior = d3.zoom()
           .scaleExtent([0.1, 8])
           .on("zoom", (event) => {
@@ -677,12 +668,14 @@ function getHTML(): string {
         const height = svgNode ? svgNode.clientHeight || svgNode.getBoundingClientRect().height : window.innerHeight;
         svg.call(zoomBehavior.transform, d3.zoomIdentity.translate(width / 2, height / 2).scale(0.8));
 
-        // 4. Set up Force Physics Simulation
+        // 4. Set up Force Physics Simulation ("Flow Free" fluid physics)
         simulation = d3.forceSimulation(allNodes)
-          .force("link", d3.forceLink(validEdges).id(d => d.id).distance(d => d.type === 'CONTAINS' ? 60 : 130).strength(0.6))
-          .force("charge", d3.forceManyBody().strength(-220).distanceMax(600))
-          .force("center", d3.forceCenter(0, 0))
-          .force("collision", d3.forceCollide().radius(d => getRadius(d) + 20))
+          .velocityDecay(0.25) // Low friction for elegant floating momentum
+          .force("link", d3.forceLink(validEdges).id(d => d.id).distance(d => d.type === 'CONTAINS' ? 80 : 200).strength(0.15)) // Looser connections
+          .force("charge", d3.forceManyBody().strength(-500)) // Wide, unconstrained node repulsion
+          .force("x", d3.forceX(0).strength(0.03)) // Gentle axial gravity
+          .force("y", d3.forceY(0).strength(0.03))
+          .force("collision", d3.forceCollide().radius(d => getRadius(d) + 25)) // Expanded breathing buffer
           .on("tick", ticked);
 
         // 5. Register Event Listeners
@@ -705,6 +698,37 @@ function getHTML(): string {
       if (d.kind === 'API' || d.kind === 'Table') return 15;
       if (d.kind === 'Class') return 13;
       return 10; // functions & others
+    }
+
+    // Classify nodes into directory trees and build directory color index
+    function getDirectory(n) {
+      if (!n.path) return '';
+      const parts = n.path.split('/');
+      if (parts.length <= 1) return '';
+      return parts.slice(0, Math.min(parts.length - 1, 2)).join('/');
+    }
+
+    function initDirectoryTreeColors() {
+      const uniqueDirs = Array.from(new Set(allNodes.map(getDirectory).filter(Boolean)));
+      uniqueDirs.sort().forEach((dir, idx) => {
+        directoryColorMap[dir] = treePalette[idx % treePalette.length];
+      });
+    }
+
+    // Get color dynamically: same tree gets a lighter shade, other trees get other colors
+    function getNodeColor(d) {
+      const dir = getDirectory(d);
+      if (!dir) {
+        return '#78716c'; // Stone Gray fallback
+      }
+      
+      const baseColor = directoryColorMap[dir] || '#78716c';
+
+      // Shaded node tree: Functions and Methods inside same directory map to a lighter shade
+      if (d.kind === 'Function' || d.kind === 'Method' || d.kind === 'Interface') {
+        return d3.color(baseColor).brighter(0.65).toString();
+      }
+      return baseColor;
     }
 
     // Build the filtering tabs dynamically based on present kinds
@@ -800,35 +824,89 @@ function getHTML(): string {
           .on("end", dragended)
         );
 
-      // Circle representing actual visual node
-      nodeEnter.append("circle")
-        .attr("class", "node-circle")
-        .attr("r", d => getRadius(d))
-        .attr("fill", d => kindColors[d.kind] || '#888')
-        .attr("fill-opacity", d => d.kind === 'File' ? 0.2 : 0.8)
-        .attr("stroke", d => {
-          return d3.color(kindColors[d.kind] || '#888').darker(0.3);
-        })
-        .attr("stroke-width", d => d.kind === 'File' ? 2 : 1.5);
+      const nodeAll = nodeEnter.merge(nodeSelection);
 
-      // Concentric rings for Tables and APIs (gives modular depth)
-      nodeEnter.filter(d => d.kind === 'API' || d.kind === 'Table')
+      // --- Morphing Geometric Shapes view ---
+      nodeAll.each(function(d) {
+        const el = d3.select(this);
+        el.selectAll(".node-shape").remove(); // clear previous shape to morph
+
+        const r = getRadius(d);
+        const color = getNodeColor(d);
+
+        let shape;
+
+        // MORPH shapes based on active tab view
+        if (currentView === 'all') {
+          // All View -> Standard elegant Circle
+          shape = el.append("circle")
+            .attr("r", r);
+        } else if (currentView === 'Function') {
+          // Functions Mode -> Render glowing Diamonds
+          shape = el.append("polygon")
+            .attr("points", '0,-' + (r * 1.25) + ' ' + (r * 1.25) + ',0 0,' + (r * 1.25) + ' -' + (r * 1.25) + ',0');
+        } else if (currentView === 'Method') {
+          // Methods Mode -> Render upward Triangles
+          shape = el.append("polygon")
+            .attr("points", '0,-' + (r * 1.3) + ' ' + (r * 1.2) + ',' + (r * 0.9) + ' -' + (r * 1.2) + ',' + (r * 0.9));
+        } else if (currentView === 'Class' || currentView === 'Interface') {
+          // Class Mode -> Render robust Squares
+          shape = el.append("rect")
+            .attr("x", -r)
+            .attr("y", -r)
+            .attr("width", r * 2)
+            .attr("height", r * 2)
+            .attr("rx", 3);
+        } else if (currentView === 'Table') {
+          // Table Mode -> Render Hexagons
+          const w = r * 1.15 * 0.86;
+          const h = r * 1.15 * 0.5;
+          const rH = r * 1.15;
+          shape = el.append("polygon")
+            .attr("points", '0,-' + rH + ' ' + w + ',-' + h + ' ' + w + ',' + h + ' 0,' + rH + ' -' + w + ',' + h + ' -' + w + ',-' + h);
+        } else if (currentView === 'API') {
+          // API Mode -> Render Horizontal Diamonds
+          shape = el.append("polygon")
+            .attr("points", '0,-' + (r * 1.2) + ' ' + (r * 1.2) + ',0 0,' + (r * 1.2) + ' -' + (r * 1.2) + ',0');
+        } else if (currentView === 'File') {
+          // File Mode -> Render Vertical Cards
+          shape = el.append("rect")
+            .attr("x", -6)
+            .attr("y", -10)
+            .attr("width", 12)
+            .attr("height", 20)
+            .attr("rx", 1.5);
+        } else {
+          // Fallback Circle
+          shape = el.append("circle")
+            .attr("r", r);
+        }
+
+        shape.attr("class", "node-shape")
+          .attr("fill", color)
+          .attr("fill-opacity", d.kind === 'File' ? 0.25 : 0.8)
+          .attr("stroke", d3.color(color).darker(0.35))
+          .attr("stroke-width", d.kind === 'File' ? 2 : 1.5);
+      });
+
+      // Extra Holographic Concentric visual rings for APIs & Tables in All view
+      nodeAll.selectAll(".outer-ring").remove();
+      nodeAll.filter(d => d.kind === 'API' || d.kind === 'Table')
         .append("circle")
         .attr("class", "outer-ring")
-        .attr("r", d => getRadius(d) + 5)
+        .attr("r", d => getRadius(d) + 6)
         .attr("fill", "none")
-        .attr("stroke", d => kindColors[d.kind])
-        .attr("stroke-opacity", 0.35)
+        .attr("stroke", d => getNodeColor(d))
+        .attr("stroke-opacity", 0.2)
         .attr("stroke-width", 1);
 
       // Text labels for symbols
-      nodeEnter.append("text")
+      nodeAll.selectAll("text.node-label").remove();
+      nodeAll.append("text")
         .attr("class", "node-label")
-        .attr("y", d => -getRadius(d) - 6)
+        .attr("y", d => d.kind === 'File' ? -15 : -getRadius(d) - 6)
         .attr("text-anchor", "middle")
         .text(d => d.name);
-
-      const nodeAll = nodeEnter.merge(nodeSelection);
 
       // Apply Filter visual fades (Highlight view)
       nodeAll.each(function(d) {
@@ -842,7 +920,7 @@ function getHTML(): string {
       simulation.alpha(0.3).restart();
     }
 
-    // Hover Highlight Spotlight Spotlight with semantic colors
+    // Hover Highlight Spotlight Spotlight with hardware-accelerated transforms
     function setNodeHover(node, isHover) {
       hoveredNode = isHover ? node : null;
 
@@ -854,9 +932,9 @@ function getHTML(): string {
           .classed("fade", false)
           .attr("marker-end", d => "url(#arrow-" + d.type + ")");
         nodesLayer.selectAll("text.node-label").classed("active", false);
-        nodesLayer.selectAll("circle.node-circle")
+        nodesLayer.selectAll(".node-shape")
           .attr("filter", null)
-          .attr("r", d => getRadius(d))
+          .attr("transform", "scale(1)")
           .attr("stroke-width", d => d.kind === 'File' ? 2 : 1.5);
         return;
       }
@@ -884,8 +962,8 @@ function getHTML(): string {
         el.classed("fade", !matches);
         
         const isHoverTarget = d.id === node.id;
-        el.select("circle.node-circle")
-          .attr("r", isHoverTarget ? getRadius(d) * 1.3 : getRadius(d))
+        el.select(".node-shape")
+          .attr("transform", isHoverTarget ? "scale(1.3)" : "scale(1)")
           .attr("stroke-width", isHoverTarget ? 3.5 : (d.kind === 'File' ? 2 : 1.5))
           .attr("filter", isHoverTarget ? "url(#glow)" : null);
 
@@ -911,7 +989,7 @@ function getHTML(): string {
         .attr("cx", mx)
         .attr("cy", my)
         .attr("r", 5)
-        .attr("stroke", kindColors[d.kind] || '#ffffff')
+        .attr("stroke", getNodeColor(d))
         .style("stroke-opacity", 1);
 
       ripple.transition()
@@ -929,7 +1007,6 @@ function getHTML(): string {
       d.fy = d.y;
     }
 
-    // Swipe dragging momentum
     function dragged(event, d) {
       d.fx = event.x;
       d.fy = event.y;
@@ -1005,13 +1082,13 @@ function getHTML(): string {
         drawFlowPulses(neighbors);
 
         let html = \`
-          <span class="node-kind-badge badge-\${node.kind}">\${node.kind}</span>
-          <h1 style="font-size: 20px; font-weight:800; margin-top:8px; line-height:1.2; word-break:break-all; color:\${kindColors[node.kind]}">\${node.name}</h1>
+          <span class="node-kind-badge">\${node.kind}</span>
+          <h1 style="font-family: 'Cinzel Decorative', serif; font-size: 20px; font-weight:900; margin-top:12px; line-height:1.2; word-break:break-all; color:\${getNodeColor(node)}">\${node.name}</h1>
           <p style="font-family:monospace; font-size:11px; color:var(--text-muted); margin-top:4px; word-break:break-all;">\${node.id}</p>
         \`;
 
         if (node.path) {
-          html += \`<p style="font-size:12px; color:#ffffff; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom:12px; margin: 12px 0; font-weight:500;">📄 \${node.path}\text\${node.startLine ? ':' + node.startLine : ''}</p>\`;
+          html += \`<p style="font-size:12px; color:#ffffff; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom:12px; margin: 12px 0; font-weight:500;">📄 \${node.path}\${node.startLine ? ':' + node.startLine : ''}</p>\`;
         }
 
         if (node.signature) {
@@ -1053,9 +1130,9 @@ function getHTML(): string {
             p.steps.forEach(s => {
               html += \`
                 <div class="why-step">
-                  <span style="font-weight:600; color:\${kindColors[s.fromType] || '#fff'};">\${s.from.split(':').pop()}</span>
+                  <span style="font-weight:600; color:\text\${getNodeColor({id: s.from, path: s.fromPath, kind: s.fromType})};">\${s.from.split(':').pop()}</span>
                   <span class="arrow">→</span>
-                  <span style="color:\${kindColors[s.toType] || '#fff'};">\text\${s.to.split(':').pop()}</span>
+                  <span style="color:\${getNodeColor({id: s.to, path: s.toPath, kind: s.toType})};">\${s.to.split(':').pop()}</span>
                   <span style="color:var(--text-muted); font-size:10px;">[\${s.edgeType}]</span>
                 </div>
               \`;
@@ -1080,12 +1157,12 @@ function getHTML(): string {
             const arrowChar = isOutgoing ? '→' : '←';
 
             html += \`
-              <div class="neighbor-item" onclick="selectNode('\${sideNode.id}')">
+              <div class="neighbor-item" onclick="selectNode('\text\${sideNode.id}')">
                 <div>
-                  <span style="font-weight:600; color:\${kindColors[sideNode.kind] || '#fff'};">\${sideNode.name}</span>
+                  <span style="font-weight:600; color:\${getNodeColor(sideNode)};">\${sideNode.name}</span>
                   <div style="font-size:10px; color:var(--text-muted);">\${sideNode.kind}</div>
                 </div>
-                <div style="font-size:11px; font-weight:700; color: \${edgeColors[e.type] || '#ffffff'};">
+                <div style="font-size:11px; font-weight:700; color: #ffffff;">
                   \${arrowChar} \${e.type}
                 </div>
               </div>
@@ -1105,7 +1182,7 @@ function getHTML(): string {
       }
     }
 
-    // Creates beautiful glowing pulses moving along the dependency links (color matched!)
+    // Creates beautiful glowing white pulses moving along the dependency links
     function drawFlowPulses(neighborEdges) {
       pulsesLayer.selectAll("circle.pulse-dot").remove();
 
@@ -1113,12 +1190,11 @@ function getHTML(): string {
         const pathEl = document.getElementById(edge.id);
         if (!pathEl) return;
 
-        // Add moving glowing particle with color matched to edge semantic type
-        const dotColor = edgeColors[edge.type] || '#ffffff';
+        // Glowing white particle streams
         const dot = pulsesLayer.append("circle")
           .attr("class", "pulse-dot")
           .attr("r", 3.5)
-          .attr("fill", dotColor);
+          .attr("fill", "#ffffff");
 
         dot.append("animateMotion")
           .attr("dur", edge.type === 'EXPOSES' ? "1.2s" : "2.0s") // APIs pulse faster!
@@ -1145,8 +1221,8 @@ function getHTML(): string {
       list.innerHTML = filtered.slice(0, 150).map(n => \`
         <li class="node-item \${selectedNode?.id === n.id ? 'selected' : ''}" onclick="selectNode('\${n.id}')">
           <div class="node-header-row">
-            <span class="node-name" style="color: \${kindColors[n.kind] || '#fff'}">\${n.name}</span>
-            <span class="node-kind-badge badge-\${n.kind}">\${n.kind.slice(0,4)}</span>
+            <span class="node-name" style="color: \${getNodeColor(n)}">\${n.name}</span>
+            <span class="node-kind-badge">\${n.kind.slice(0,4)}</span>
           </div>
           <div class="node-path-row">\${n.path || n.id}</div>
         </li>
