@@ -419,6 +419,15 @@ function extractPass1(
           }
           if (resolved) {
             meta.imports.set(local, { sourcePath: resolved, name: exported });
+            const targetFileId = fileId(resolved);
+            const fileEdgeId = edgeId(fId, targetFileId, 'IMPORTS');
+            if (!edges.some(e => e.id === fileEdgeId)) {
+              edges.push({
+                id: fileEdgeId, type: 'IMPORTS', from: fId, to: targetFileId,
+                evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+                sources: ['parser'], confidence: 1.0, conflict: false, updated_at: now,
+              });
+            }
           } else {
             meta.imports.set(local, { externalPkg: path, name: exported });
             const extId = `ext:${path}`;
@@ -444,6 +453,15 @@ function extractPass1(
 
         if (resolved) {
           meta.imports.set(local, { sourcePath: resolved, name: 'default' });
+          const targetFileId = fileId(resolved);
+          const fileEdgeId = edgeId(fId, targetFileId, 'IMPORTS');
+          if (!edges.some(e => e.id === fileEdgeId)) {
+            edges.push({
+              id: fileEdgeId, type: 'IMPORTS', from: fId, to: targetFileId,
+              evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+              sources: ['parser'], confidence: 1.0, conflict: false, updated_at: now,
+            });
+          }
         } else {
           meta.imports.set(local, { externalPkg: path, name: 'default' });
           const extId = `ext:${path}`;
@@ -468,6 +486,15 @@ function extractPass1(
 
         if (resolved) {
           meta.wildcardImports.push({ sourcePath: resolved, alias });
+          const targetFileId = fileId(resolved);
+          const fileEdgeId = edgeId(fId, targetFileId, 'IMPORTS');
+          if (!edges.some(e => e.id === fileEdgeId)) {
+            edges.push({
+              id: fileEdgeId, type: 'IMPORTS', from: fId, to: targetFileId,
+              evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+              sources: ['parser'], confidence: 1.0, conflict: false, updated_at: now,
+            });
+          }
         } else {
           meta.wildcardImports.push({ externalPkg: path, alias });
           const extId = `ext:${path}`;
@@ -491,6 +518,15 @@ function extractPass1(
         const resolved = resolveImportPath(relPath, path, allFiles);
         if (resolved) {
           meta.wildcardImports.push({ sourcePath: resolved, alias });
+          const targetFileId = fileId(resolved);
+          const fileEdgeId = edgeId(fId, targetFileId, 'IMPORTS');
+          if (!edges.some(e => e.id === fileEdgeId)) {
+            edges.push({
+              id: fileEdgeId, type: 'IMPORTS', from: fId, to: targetFileId,
+              evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+              sources: ['parser'], confidence: 1.0, conflict: false, updated_at: now,
+            });
+          }
         } else {
           meta.wildcardImports.push({ externalPkg: path, alias });
           const extId = `ext:${path}`;
@@ -527,6 +563,15 @@ function extractPass1(
           }
           if (resolved) {
             meta.imports.set(local, { sourcePath: resolved, name: exported });
+            const targetFileId = fileId(resolved);
+            const fileEdgeId = edgeId(fId, targetFileId, 'IMPORTS');
+            if (!edges.some(e => e.id === fileEdgeId)) {
+              edges.push({
+                id: fileEdgeId, type: 'IMPORTS', from: fId, to: targetFileId,
+                evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+                sources: ['parser'], confidence: 1.0, conflict: false, updated_at: now,
+              });
+            }
           } else {
             meta.imports.set(local, { externalPkg: mod, name: exported });
           }
@@ -543,6 +588,15 @@ function extractPass1(
 
         if (resolved) {
           meta.wildcardImports.push({ sourcePath: resolved, alias });
+          const targetFileId = fileId(resolved);
+          const fileEdgeId = edgeId(fId, targetFileId, 'IMPORTS');
+          if (!edges.some(e => e.id === fileEdgeId)) {
+            edges.push({
+              id: fileEdgeId, type: 'IMPORTS', from: fId, to: targetFileId,
+              evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+              sources: ['parser'], confidence: 1.0, conflict: false, updated_at: now,
+            });
+          }
         } else {
           meta.wildcardImports.push({ externalPkg: mod, alias });
         }

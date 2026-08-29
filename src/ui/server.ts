@@ -28,21 +28,23 @@ function getHTML(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Architecture Mapper — Monochrome Suite</title>
+  <title>Architecture Mapper — Neon Codeflow Suite</title>
   <!-- D3 Engine -->
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <style>
     :root {
-      --bg-deep: #050505;
-      --bg-panel: #0d0d0d;
-      --bg-panel-hover: #161616;
-      --border-glow: #222222;
+      --bg-deep: #050508;
+      --bg-panel: #0b0c13;
+      --bg-panel-hover: #151724;
+      --border-glow: #1e2235;
       --border-active: #ffffff;
-      --text-main: #f3f4f6;
-      --text-muted: #8e9196;
-      --primary: #ffffff;
-      --accent: #a3a3a3;
-      --accent-dark: #404040;
+      --text-main: #f1f3f9;
+      --text-muted: #7e849e;
+      --primary: #5ca0ff;
+      --accent-purple: #c084fc;
+      --accent-green: #34d399;
+      --accent-amber: #fbbf24;
+      --accent-coral: #f87171;
     }
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -77,7 +79,7 @@ function getHTML(): string {
     #graph-container {
       flex: 1;
       position: relative;
-      background: radial-gradient(circle at center, #111111 0%, #030303 100%);
+      background: radial-gradient(circle at center, #0e111d 0%, #030305 100%);
     }
 
     svg#visualizer {
@@ -93,7 +95,7 @@ function getHTML(): string {
       top: 0;
       bottom: 0;
       width: 400px;
-      background: rgba(13, 13, 13, 0.95);
+      background: rgba(11, 12, 19, 0.96);
       backdrop-filter: blur(20px);
       border-left: 1px solid var(--border-glow);
       padding: 28px;
@@ -117,7 +119,7 @@ function getHTML(): string {
       gap: 8px;
     }
     h1.brand span {
-      background: linear-gradient(135deg, #ffffff, #888888);
+      background: linear-gradient(135deg, #60a5fa, #c084fc);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
     }
@@ -136,7 +138,7 @@ function getHTML(): string {
     }
     .stat:hover {
       transform: translateY(-2px);
-      border-color: #404040;
+      border-color: #3b82f6;
     }
     .stat-value {
       font-size: 22px;
@@ -166,24 +168,26 @@ function getHTML(): string {
       transition: border-color 0.2s, box-shadow 0.2s;
     }
     .search:focus {
-      border-color: var(--border-active);
-      box-shadow: 0 0 12px rgba(255, 255, 255, 0.1);
+      border-color: var(--primary);
+      box-shadow: 0 0 12px rgba(96, 165, 250, 0.2);
     }
 
-    /* Tabs */
+    /* Dynamic Tabs Bar */
     .tab-bar {
       display: flex;
+      flex-wrap: wrap;
       background: rgba(255,255,255,0.01);
       padding: 4px;
       border-radius: 6px;
       border: 1px solid rgba(255,255,255,0.03);
+      gap: 4px;
     }
     .tab {
-      flex: 1;
-      padding: 8px;
+      flex: 1 1 auto;
+      padding: 6px 8px;
       border-radius: 4px;
       cursor: pointer;
-      font-size: 11px;
+      font-size: 10px;
       font-weight: 600;
       background: transparent;
       border: none;
@@ -219,12 +223,12 @@ function getHTML(): string {
     }
     .node-item:hover {
       background: var(--bg-panel-hover);
-      border-color: #404040;
+      border-color: #31354a;
       transform: translateX(4px);
     }
     .node-item.selected {
-      background: rgba(255, 255, 255, 0.05);
-      border-color: var(--border-active);
+      background: rgba(96, 165, 250, 0.08);
+      border-color: var(--primary);
     }
 
     .node-header-row {
@@ -257,33 +261,60 @@ function getHTML(): string {
       text-overflow: ellipsis;
     }
 
-    /* Monochrome Kinds Badges */
-    .badge-Function, .badge-Method { background: #ffffff; color: #000000; }
-    .badge-Class { background: #e5e5e5; color: #000000; }
-    .badge-Interface { background: #a3a3a3; color: #000000; }
-    .badge-Table { background: #404040; color: #ffffff; border: 1px solid #525252; }
-    .badge-API { background: #ffffff; color: #000000; border: 1px solid #000000; }
-    .badge-File { background: #262626; color: #a3a3a3; }
-    .badge-External { background: #171717; color: #737373; border: 1px solid #262626; }
-    .badge-Test { background: #d4d4d4; color: #000000; }
+    /* Semantic Neon Kinds Badges */
+    .badge-Function, .badge-Method { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.2); }
+    .badge-Class { background: rgba(192, 132, 252, 0.15); color: #c084fc; border: 1px solid rgba(192, 132, 252, 0.2); }
+    .badge-Interface { background: rgba(139, 92, 246, 0.15); color: #a78bfa; border: 1px solid rgba(139, 92, 246, 0.2); }
+    .badge-Table { background: rgba(251, 191, 36, 0.15); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.2); }
+    .badge-API { background: rgba(52, 211, 153, 0.15); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.2); }
+    .badge-File { background: rgba(71, 85, 105, 0.15); color: #94a3b8; border: 1px solid rgba(71, 85, 105, 0.2); }
+    .badge-External { background: rgba(248, 113, 113, 0.15); color: #f87171; border: 1px solid rgba(248, 113, 113, 0.2); }
+    .badge-Test { background: rgba(30, 150, 200, 0.15); color: #38bdf8; border: 1px solid rgba(30, 150, 200, 0.2); }
 
-    /* SVG elements styles */
+    /* Semantic Colored Directed Links */
     .link {
-      stroke: rgba(255, 255, 255, 0.06);
-      stroke-width: 1.5px;
       fill: none;
       transition: stroke 0.3s, stroke-width 0.3s, stroke-opacity 0.3s;
       cursor: pointer;
     }
-    .link.highlight {
-      stroke: #ffffff;
-      stroke-width: 2.5px;
-      stroke-opacity: 0.95;
+    
+    /* Edge Semantic Colors */
+    .link.type-CONTAINS {
+      stroke: #1e202f;
+      stroke-width: 1px;
+      stroke-dasharray: 2 2;
     }
-    .link.fade {
-      stroke-opacity: 0.02;
+    .link.type-CALLS {
+      stroke: rgba(96, 165, 250, 0.25);
+      stroke-width: 1.5px;
+    }
+    .link.type-IMPORTS {
+      stroke: rgba(167, 139, 250, 0.35);
+      stroke-width: 1.2px;
+      stroke-dasharray: 4 2;
+    }
+    .link.type-EXPOSES {
+      stroke: rgba(52, 211, 153, 0.35);
+      stroke-width: 2px;
+      stroke-dasharray: 4 4;
+    }
+    .link.type-READS, .link.type-WRITES {
+      stroke: rgba(251, 191, 36, 0.3);
+      stroke-width: 1.8px;
     }
 
+    /* Edge Highlights */
+    .link.type-CONTAINS.highlight { stroke: #4b5563; stroke-width: 1.2px; }
+    .link.type-CALLS.highlight { stroke: #60a5fa; stroke-width: 3px; stroke-opacity: 0.95; }
+    .link.type-IMPORTS.highlight { stroke: #c084fc; stroke-width: 2.2px; stroke-opacity: 0.95; }
+    .link.type-EXPOSES.highlight { stroke: #34d399; stroke-width: 3px; stroke-opacity: 0.95; }
+    .link.type-READS.highlight, .link.type-WRITES.highlight { stroke: #fbbf24; stroke-width: 2.5px; stroke-opacity: 0.95; }
+
+    .link.fade {
+      stroke-opacity: 0.02 !important;
+    }
+
+    /* Nodes layout and animations */
     .node-g {
       cursor: grab;
       transition: opacity 0.3s;
@@ -370,10 +401,10 @@ function getHTML(): string {
       font-weight: 600;
       margin: 3px;
     }
-    .risk-critical { background: rgba(255, 255, 255, 0.08); color: #ffffff; border: 1px solid rgba(255, 255, 255, 0.15); }
-    .risk-untested { background: rgba(163, 163, 163, 0.08); color: #a3a3a3; border: 1px solid rgba(163, 163, 163, 0.15); }
-    .risk-db_write { background: rgba(229, 229, 229, 0.08); color: #e5e5e5; border: 1px solid rgba(229, 229, 229, 0.15); }
-    .risk-external { background: rgba(64, 64, 64, 0.15); color: #d4d4d4; border: 1px solid rgba(64, 64, 64, 0.25); }
+    .risk-critical { background: rgba(248, 113, 113, 0.1); color: #f87171; border: 1px solid rgba(248, 113, 113, 0.2); }
+    .risk-untested { background: rgba(251, 191, 36, 0.1); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.2); }
+    .risk-db_write { background: rgba(52, 211, 153, 0.1); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.2); }
+    .risk-external { background: rgba(167, 139, 250, 0.1); color: #a78bfa; border: 1px solid rgba(167, 139, 250, 0.2); }
 
     /* Flow step / why-path styling */
     .why-path {
@@ -391,7 +422,7 @@ function getHTML(): string {
       align-items: center;
       gap: 6px;
     }
-    .arrow { color: #ffffff; font-weight: bold; }
+    .arrow { color: var(--primary); font-weight: bold; }
 
     /* Detail simple items */
     .neighbor-item {
@@ -408,13 +439,12 @@ function getHTML(): string {
     }
     .neighbor-item:hover {
       background: var(--bg-panel-hover);
-      border-color: #404040;
+      border-color: #31354a;
       transform: translateX(4px);
     }
 
     /* Edge animated flows */
     .pulse-dot {
-      fill: #ffffff;
       filter: url(#glow-pulse);
     }
 
@@ -464,11 +494,7 @@ function getHTML(): string {
       </div>
 
       <div class="tab-bar">
-        <button class="tab active" data-view="all">All</button>
-        <button class="tab" data-view="Function">Functions</button>
-        <button class="tab" data-view="Class">Classes</button>
-        <button class="tab" data-view="Table">Tables</button>
-        <button class="tab" data-view="API">APIs</button>
+        <!-- Dynamically generated based on present kinds -->
       </div>
 
       <div class="node-list-container">
@@ -496,12 +522,47 @@ function getHTML(): string {
             </feMerge>
           </filter>
           
-          <!-- Edge Arrows Markers -->
-          <marker id="arrow-standard" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="rgba(255,255,255,0.1)" />
+          <!-- Semantic Directional Markers -->
+          <marker id="arrow-CONTAINS" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#1e202f" />
           </marker>
-          <marker id="arrow-highlight" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#ffffff" />
+          <marker id="arrow-CONTAINS-highlight" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#4b5563" />
+          </marker>
+
+          <marker id="arrow-CALLS" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#3b82f6" fill-opacity="0.5" />
+          </marker>
+          <marker id="arrow-CALLS-highlight" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#60a5fa" />
+          </marker>
+
+          <marker id="arrow-IMPORTS" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#8b5cf6" fill-opacity="0.5" />
+          </marker>
+          <marker id="arrow-IMPORTS-highlight" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#c084fc" />
+          </marker>
+
+          <marker id="arrow-EXPOSES" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#10b981" fill-opacity="0.5" />
+          </marker>
+          <marker id="arrow-EXPOSES-highlight" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#34d399" />
+          </marker>
+
+          <marker id="arrow-READS" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#f59e0b" fill-opacity="0.5" />
+          </marker>
+          <marker id="arrow-READS-highlight" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#fbbf24" />
+          </marker>
+
+          <marker id="arrow-WRITES" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#f59e0b" fill-opacity="0.5" />
+          </marker>
+          <marker id="arrow-WRITES-highlight" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#fbbf24" />
           </marker>
         </defs>
         
@@ -522,19 +583,29 @@ function getHTML(): string {
   </div>
 
   <script>
-    // Monochrome configuration details
+    // Colorful semantic configuration details
     const kindColors = {
-      Function: '#ffffff',
-      Method: '#f5f5f5',
-      Class: '#e5e5e5',
-      Interface: '#a3a3a3',
-      Table: '#d4d4d4',
-      API: '#ffffff',
-      File: '#404040',
-      External: '#262626',
-      Test: '#737373',
-      Module: '#a3a3a3',
+      Function: '#60a5fa',   // Blue
+      Method: '#3b82f6',     // Indigo Blue
+      Class: '#c084fc',      // Amethyst Purple
+      Interface: '#a78bfa',  // Violet Lavender
+      Table: '#fbbf24',      // Amber Yellow
+      API: '#34d399',        // Emerald Green
+      File: '#94a3b8',       // Slate Gray
+      External: '#f87171',   // Warm Coral Red
+      Test: '#38bdf8',       // Sky Blue
+      Module: '#818cf8',     // Pastel Purple
       Repo: '#ffffff'
+    };
+
+    // Edge type Colors
+    const edgeColors = {
+      CONTAINS: '#1e202f',
+      CALLS: '#60a5fa',
+      IMPORTS: '#c084fc',
+      EXPOSES: '#34d399',
+      READS: '#fbbf24',
+      WRITES: '#fbbf24'
     };
 
     let allNodes = [];
@@ -564,11 +635,8 @@ function getHTML(): string {
         document.getElementById('stat-nodes').textContent = allNodes.length;
         document.getElementById('stat-edges').textContent = allEdges.length;
 
-        // Map from/to properties to source/target for D3 forceLink compliance
-        allEdges.forEach(e => {
-          e.source = e.from;
-          e.target = e.to;
-        });
+        // 2. Generate categories tabs dynamically based ONLY on kinds present in the repo
+        buildDynamicTabs();
 
         // Jitter & coordinate safety: ensure nodes have valid x and y coords initially
         allNodes.forEach((n, i) => {
@@ -580,6 +648,12 @@ function getHTML(): string {
           }
         });
 
+        // Map from/to properties to source/target for D3 forceLink compliance
+        allEdges.forEach(e => {
+          e.source = e.from;
+          e.target = e.to;
+        });
+
         // Filter out dangling edges referencing missing node IDs to avoid D3 simulation crashes
         const nodeIds = new Set(allNodes.map(n => n.id));
         const validEdges = allEdges.filter(e => {
@@ -588,7 +662,7 @@ function getHTML(): string {
           return nodeIds.has(fromId) && nodeIds.has(toId);
         });
 
-        // 2. Set up swipe panning / zooming using D3 zoom
+        // 3. Set up swipe panning / zooming using D3 zoom
         zoomBehavior = d3.zoom()
           .scaleExtent([0.1, 8])
           .on("zoom", (event) => {
@@ -603,18 +677,18 @@ function getHTML(): string {
         const height = svgNode ? svgNode.clientHeight || svgNode.getBoundingClientRect().height : window.innerHeight;
         svg.call(zoomBehavior.transform, d3.zoomIdentity.translate(width / 2, height / 2).scale(0.8));
 
-        // 3. Set up Force Physics Simulation
+        // 4. Set up Force Physics Simulation
         simulation = d3.forceSimulation(allNodes)
-          .force("link", d3.forceLink(validEdges).id(d => d.id).distance(120).strength(0.6))
-          .force("charge", d3.forceManyBody().strength(-200).distanceMax(500))
+          .force("link", d3.forceLink(validEdges).id(d => d.id).distance(d => d.type === 'CONTAINS' ? 60 : 130).strength(0.6))
+          .force("charge", d3.forceManyBody().strength(-220).distanceMax(600))
           .force("center", d3.forceCenter(0, 0))
-          .force("collision", d3.forceCollide().radius(d => getRadius(d) + 18))
+          .force("collision", d3.forceCollide().radius(d => getRadius(d) + 20))
           .on("tick", ticked);
 
-        // 4. Register Event Listeners
+        // 5. Register Event Listeners
         initEvents();
 
-        // 5. Initial Render
+        // 6. Initial Render
         renderNodeList();
         updateGraphVisuals(validEdges);
       } catch (err) {
@@ -627,10 +701,36 @@ function getHTML(): string {
     }
 
     function getRadius(d) {
-      if (d.kind === 'File') return 6;
-      if (d.kind === 'API' || d.kind === 'Table') return 14;
-      if (d.kind === 'Class') return 12;
-      return 9; // functions & others
+      if (d.kind === 'File') return 8;
+      if (d.kind === 'API' || d.kind === 'Table') return 15;
+      if (d.kind === 'Class') return 13;
+      return 10; // functions & others
+    }
+
+    // Build the filtering tabs dynamically based on present kinds
+    function buildDynamicTabs() {
+      const tabContainer = document.querySelector('.tab-bar');
+      if (!tabContainer) return;
+
+      const presentKinds = new Set(allNodes.map(n => n.kind));
+      let html = '<button class="tab active" data-view="all">All</button>';
+      
+      const orderedKinds = ['Function', 'Method', 'Class', 'Interface', 'Table', 'API', 'File', 'External', 'Test'];
+      orderedKinds.forEach(kind => {
+        if (presentKinds.has(kind)) {
+          const label = kind === 'Function' ? 'Functions' :
+                        kind === 'Method' ? 'Methods' :
+                        kind === 'Class' ? 'Classes' :
+                        kind === 'Interface' ? 'Interfaces' :
+                        kind === 'Table' ? 'Tables' :
+                        kind === 'API' ? 'APIs' :
+                        kind === 'File' ? 'Files' :
+                        kind === 'External' ? 'Externals' :
+                        kind === 'Test' ? 'Tests' : kind;
+          html += '<button class="tab" data-view="' + kind + '">' + label + '</button>';
+        }
+      });
+      tabContainer.innerHTML = html;
     }
 
     // Force Simulation update ticks
@@ -656,14 +756,13 @@ function getHTML(): string {
       const linkSelection = linksLayer.selectAll("path.link")
         .data(validEdges, d => d.id);
 
-      // Remove unwanted links
       linkSelection.exit().remove();
 
-      // Insert new links with arrowheads
+      // Insert new links with semantic arrowheads
       const linkEnter = linkSelection.enter().append("path")
-        .attr("class", "link")
+        .attr("class", d => "link type-" + d.type)
         .attr("id", d => d.id)
-        .attr("marker-end", "url(#arrow-standard)")
+        .attr("marker-end", d => "url(#arrow-" + d.type + ")")
         .on("click", (event, d) => {
           event.stopPropagation();
           selectNode(d.source.id);
@@ -671,11 +770,9 @@ function getHTML(): string {
 
       // Merge & update attributes
       const linkAll = linkEnter.merge(linkSelection)
-        .attr("stroke", d => {
-          if (selectedNode && (d.source.id === selectedNode.id || d.target.id === selectedNode.id)) {
-            return '#ffffff';
-          }
-          return 'rgba(255,255,255,0.06)';
+        .attr("marker-end", d => {
+          const isSelectedPath = selectedNode && (d.source.id === selectedNode.id || d.target.id === selectedNode.id);
+          return isSelectedPath ? "url(#arrow-" + d.type + "-highlight)" : "url(#arrow-" + d.type + ")";
         });
 
       // Draw Nodes (Groups)
@@ -708,20 +805,20 @@ function getHTML(): string {
         .attr("class", "node-circle")
         .attr("r", d => getRadius(d))
         .attr("fill", d => kindColors[d.kind] || '#888')
+        .attr("fill-opacity", d => d.kind === 'File' ? 0.2 : 0.8)
         .attr("stroke", d => {
-          if (d.kind === 'Function' || d.kind === 'API') return '#000000';
-          return '#737373';
+          return d3.color(kindColors[d.kind] || '#888').darker(0.3);
         })
-        .attr("stroke-width", 1.5);
+        .attr("stroke-width", d => d.kind === 'File' ? 2 : 1.5);
 
-      // Concentric rings for tables and APIs
+      // Concentric rings for Tables and APIs (gives modular depth)
       nodeEnter.filter(d => d.kind === 'API' || d.kind === 'Table')
         .append("circle")
         .attr("class", "outer-ring")
-        .attr("r", d => getRadius(d) + 4)
+        .attr("r", d => getRadius(d) + 5)
         .attr("fill", "none")
-        .attr("stroke", "#ffffff")
-        .attr("stroke-opacity", 0.2)
+        .attr("stroke", d => kindColors[d.kind])
+        .attr("stroke-opacity", 0.35)
         .attr("stroke-width", 1);
 
       // Text labels for symbols
@@ -738,14 +835,14 @@ function getHTML(): string {
         const el = d3.select(this);
         const matchesType = activeIds.has(d.id);
         el.classed("fade", !matchesType);
-        el.select("text.node-label").style("opacity", matchesType ? (d.kind === 'File' ? 0.2 : 0.8) : 0.05);
+        el.select("text.node-label").style("opacity", matchesType ? (d.kind === 'File' ? 0.4 : 0.8) : 0.05);
       });
 
       // Restart force physics
       simulation.alpha(0.3).restart();
     }
 
-    // Hover Highlight Spotlight Spotlight
+    // Hover Highlight Spotlight Spotlight with semantic colors
     function setNodeHover(node, isHover) {
       hoveredNode = isHover ? node : null;
 
@@ -755,12 +852,12 @@ function getHTML(): string {
         linksLayer.selectAll("path.link")
           .classed("highlight", false)
           .classed("fade", false)
-          .attr("marker-end", "url(#arrow-standard)");
+          .attr("marker-end", d => "url(#arrow-" + d.type + ")");
         nodesLayer.selectAll("text.node-label").classed("active", false);
         nodesLayer.selectAll("circle.node-circle")
           .attr("filter", null)
           .attr("r", d => getRadius(d))
-          .attr("stroke-width", 1.5);
+          .attr("stroke-width", d => d.kind === 'File' ? 2 : 1.5);
         return;
       }
 
@@ -780,7 +877,7 @@ function getHTML(): string {
         }
       });
 
-      // Apply transitions & filters
+      // Apply transitions & glows
       nodesLayer.selectAll("g.node-g").each(function(d) {
         const matches = connectedNodeIds.has(d.id);
         const el = d3.select(this);
@@ -789,7 +886,7 @@ function getHTML(): string {
         const isHoverTarget = d.id === node.id;
         el.select("circle.node-circle")
           .attr("r", isHoverTarget ? getRadius(d) * 1.3 : getRadius(d))
-          .attr("stroke-width", isHoverTarget ? 3.5 : 1.5)
+          .attr("stroke-width", isHoverTarget ? 3.5 : (d.kind === 'File' ? 2 : 1.5))
           .attr("filter", isHoverTarget ? "url(#glow)" : null);
 
         el.select("text.node-label")
@@ -801,7 +898,7 @@ function getHTML(): string {
         d3.select(this)
           .classed("highlight", matches)
           .classed("fade", !matches)
-          .attr("marker-end", matches ? "url(#arrow-highlight)" : "url(#arrow-standard)");
+          .attr("marker-end", d => matches ? "url(#arrow-" + d.type + "-highlight)" : "url(#arrow-" + d.type + ")");
       });
     }
 
@@ -814,7 +911,7 @@ function getHTML(): string {
         .attr("cx", mx)
         .attr("cy", my)
         .attr("r", 5)
-        .attr("stroke", "#ffffff")
+        .attr("stroke", kindColors[d.kind] || '#ffffff')
         .style("stroke-opacity", 1);
 
       ripple.transition()
@@ -832,6 +929,7 @@ function getHTML(): string {
       d.fy = d.y;
     }
 
+    // Swipe dragging momentum
     function dragged(event, d) {
       d.fx = event.x;
       d.fy = event.y;
@@ -908,12 +1006,12 @@ function getHTML(): string {
 
         let html = \`
           <span class="node-kind-badge badge-\${node.kind}">\${node.kind}</span>
-          <h1 style="font-size: 20px; font-weight:800; margin-top:8px; line-height:1.2; word-break:break-all;">\${node.name}</h1>
+          <h1 style="font-size: 20px; font-weight:800; margin-top:8px; line-height:1.2; word-break:break-all; color:\${kindColors[node.kind]}">\${node.name}</h1>
           <p style="font-family:monospace; font-size:11px; color:var(--text-muted); margin-top:4px; word-break:break-all;">\${node.id}</p>
         \`;
 
         if (node.path) {
-          html += \`<p style="font-size:12px; color:#ffffff; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom:12px; margin: 12px 0; font-weight:500;">📄 \${node.path}\${node.startLine ? ':' + node.startLine : ''}</p>\`;
+          html += \`<p style="font-size:12px; color:#ffffff; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom:12px; margin: 12px 0; font-weight:500;">📄 \${node.path}\text\${node.startLine ? ':' + node.startLine : ''}</p>\`;
         }
 
         if (node.signature) {
@@ -955,9 +1053,9 @@ function getHTML(): string {
             p.steps.forEach(s => {
               html += \`
                 <div class="why-step">
-                  <span style="font-weight:600; color:#fff;">\${s.from.split(':').pop()}</span>
+                  <span style="font-weight:600; color:\${kindColors[s.fromType] || '#fff'};">\${s.from.split(':').pop()}</span>
                   <span class="arrow">→</span>
-                  <span style="color:#fff;">\${s.to.split(':').pop()}</span>
+                  <span style="color:\${kindColors[s.toType] || '#fff'};">\text\${s.to.split(':').pop()}</span>
                   <span style="color:var(--text-muted); font-size:10px;">[\${s.edgeType}]</span>
                 </div>
               \`;
@@ -984,10 +1082,10 @@ function getHTML(): string {
             html += \`
               <div class="neighbor-item" onclick="selectNode('\${sideNode.id}')">
                 <div>
-                  <span style="font-weight:600; color:#fff;">\${sideNode.name}</span>
+                  <span style="font-weight:600; color:\${kindColors[sideNode.kind] || '#fff'};">\${sideNode.name}</span>
                   <div style="font-size:10px; color:var(--text-muted);">\${sideNode.kind}</div>
                 </div>
-                <div style="font-size:11px; font-weight:700; color: #ffffff;">
+                <div style="font-size:11px; font-weight:700; color: \${edgeColors[e.type] || '#ffffff'};">
                   \${arrowChar} \${e.type}
                 </div>
               </div>
@@ -1007,7 +1105,7 @@ function getHTML(): string {
       }
     }
 
-    // Creates beautiful glowing pulses moving along the dependency links
+    // Creates beautiful glowing pulses moving along the dependency links (color matched!)
     function drawFlowPulses(neighborEdges) {
       pulsesLayer.selectAll("circle.pulse-dot").remove();
 
@@ -1015,14 +1113,15 @@ function getHTML(): string {
         const pathEl = document.getElementById(edge.id);
         if (!pathEl) return;
 
-        // Add moving glowing particle
+        // Add moving glowing particle with color matched to edge semantic type
+        const dotColor = edgeColors[edge.type] || '#ffffff';
         const dot = pulsesLayer.append("circle")
           .attr("class", "pulse-dot")
           .attr("r", 3.5)
-          .attr("fill", "#ffffff");
+          .attr("fill", dotColor);
 
         dot.append("animateMotion")
-          .attr("dur", "2.0s")
+          .attr("dur", edge.type === 'EXPOSES' ? "1.2s" : "2.0s") // APIs pulse faster!
           .attr("repeatCount", "indefinite")
           .attr("path", pathEl.getAttribute("d"));
       });
@@ -1046,7 +1145,7 @@ function getHTML(): string {
       list.innerHTML = filtered.slice(0, 150).map(n => \`
         <li class="node-item \${selectedNode?.id === n.id ? 'selected' : ''}" onclick="selectNode('\${n.id}')">
           <div class="node-header-row">
-            <span class="node-name">\${n.name}</span>
+            <span class="node-name" style="color: \${kindColors[n.kind] || '#fff'}">\${n.name}</span>
             <span class="node-kind-badge badge-\${n.kind}">\${n.kind.slice(0,4)}</span>
           </div>
           <div class="node-path-row">\${n.path || n.id}</div>
@@ -1075,23 +1174,24 @@ function getHTML(): string {
         renderNodeList(e.target.value);
       });
 
-      // Filter Tabs
-      document.querySelectorAll('.tab').forEach(tab => {
-        tab.addEventListener('click', (e) => {
-          document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-          tab.classList.add('active');
-          currentView = tab.dataset.view;
-          
-          renderNodeList(document.getElementById('search').value);
-          
-          const nodeIds = new Set(allNodes.map(n => n.id));
-          const validEdges = allEdges.filter(e => {
-            const fromId = typeof e.from === 'object' ? e.from.id : e.from;
-            const toId = typeof e.to === 'object' ? e.to.id : e.to;
-            return nodeIds.has(fromId) && nodeIds.has(toId);
-          });
-          updateGraphVisuals(validEdges);
+      // Filter Tabs (Delegated registry because tabs are dynamically created!)
+      document.querySelector('.tab-bar').addEventListener('click', (e) => {
+        const tab = e.target.closest('.tab');
+        if (!tab) return;
+
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        currentView = tab.dataset.view;
+        
+        renderNodeList(document.getElementById('search').value);
+        
+        const nodeIds = new Set(allNodes.map(n => n.id));
+        const validEdges = allEdges.filter(e => {
+          const fromId = typeof e.from === 'object' ? e.from.id : e.from;
+          const toId = typeof e.to === 'object' ? e.to.id : e.to;
+          return nodeIds.has(fromId) && nodeIds.has(toId);
         });
+        updateGraphVisuals(validEdges);
       });
     }
 
