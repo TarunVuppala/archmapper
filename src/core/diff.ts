@@ -1,62 +1,93 @@
 // Symbol-level diff impact.
 // Compares symbols between two versions and computes union impact.
 
+import { execSync } from 'node:child_process';
 import type { SymbolDiff, DiffImpactResult, ChangeKind } from './types.js';
 import type { GraphStore } from './store.js';
 import { computeImpact } from './impact.js';
+import { parseSingleFile } from '../parse/index.js';
 
 export interface DiffOptions {
   base?: string;
   head?: string;
 }
 
+// Read uncommitted, staged, and untracked files from git
+export function getGitChangedFiles(repoPath: string = '.'): string[] {
+  try {
+    const files = new Set<string>();
+
+    // 1. Unstaged modified files
+    try {
+      const stdout = execSync('git diff --name-only', { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] });
+      stdout.split('\n').map(f => f.trim()).filter(Boolean).forEach(f => files.add(f));
+    } catch { /* ignore git fail */ }
+
+    // 2. Staged modified files
+    try {
+      const stagedStdout = execSync('git diff --cached --name-only', { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] });
+      stagedStdout.split('\n').map(f => f.trim()).filter(Boolean).forEach(f => files.add(f));
+    } catch { /* ignore git fail */ }
+
+    // 3. Untracked workspace files
+    try {
+      const untrackedStdout = execSync('git ls-files --others --exclude-standard', { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] });
+      untrackedStdout.split('\n').map(f => f.trim()).filter(Boolean).forEach(f => files.add(f));
+    } catch { /* ignore git fail */ }
+
+    return Array.from(files);
+  } catch {
+    return [];
+  }
+}
+
 // Compare two sets of nodes to detect symbol changes
 export function diffSymbols(
   store: GraphStore,
-  _base: string,
-  _head: string,
+  repoPath: string = '.',
   changedPaths?: string[]
 ): SymbolDiff[] {
   const diffs: SymbolDiff[] = [];
+  const paths = changedPaths && changedPaths.length > 0 ? changedPaths : getGitChangedFiles(repoPath);
 
-  // If we have specific changed paths, diff those
-  if (changedPaths && changedPaths.length > 0) {
-    for (const path of changedPaths) {
-      const oldNodes = store.listNodes().filter(n => n.path === path);
-      const newNodes = store.listNodes().filter(n => n.path === path);
+  for (const path of paths) {
+    // 1. Get the previously indexed symbols from SQLite (old version)
+    const oldNodes = store.listNodes().filter(n => n.path === path && n.kind !== 'File');
+    
+    // 2. Parse the currently modified file on-disk (new version)
+    const { nodes: newNodes } = parseSingleFile(repoPath, path);
+    const freshNodes = newNodes.filter(n => n.kind !== 'File');
 
-      // Build signature maps
-      const oldSigs = new Map(oldNodes.map(n => [n.id, n.signature]));
-      const newSigs = new Map(newNodes.map(n => [n.id, n.signature]));
+    // Build signature maps for comparison
+    const oldSigs = new Map(oldNodes.map(n => [n.id, n.signature]));
+    const newSigs = new Map(freshNodes.map(n => [n.id, n.signature]));
 
-      // Find removed symbols
-      for (const [id] of oldSigs) {
-        if (!newSigs.has(id)) {
-          diffs.push({ nodeId: id, change: 'removed' });
-        }
+    // Find removed symbols
+    for (const [id] of oldSigs) {
+      if (!newSigs.has(id)) {
+        diffs.push({ nodeId: id, change: 'removed' });
       }
+    }
 
-      // Find added symbols
-      for (const [id] of newSigs) {
-        if (!oldSigs.has(id)) {
-          diffs.push({ nodeId: id, change: 'added' });
-        }
+    // Find added symbols
+    for (const [id] of newSigs) {
+      if (!oldSigs.has(id)) {
+        diffs.push({ nodeId: id, change: 'added' });
       }
+    }
 
-      // Find changed symbols
-      for (const [id, newSig] of newSigs) {
-        const oldSig = oldSigs.get(id);
-        if (oldSig !== undefined) {
-          if (oldSig !== newSig) {
-            // Determine if it's a signature change or body-only
-            const isSignatureChange = oldSig.split('(')[0] !== (newSig ?? '').split('(')[0];
-            diffs.push({
-              nodeId: id,
-              change: isSignatureChange ? 'signature_changed' : 'body_only',
-              oldSignature: oldSig,
-              newSignature: newSig ?? undefined,
-            });
-          }
+    // Find changed symbols (signature vs body modifications)
+    for (const [id, newSig] of newSigs) {
+      const oldSig = oldSigs.get(id);
+      if (oldSig !== undefined) {
+        if (oldSig !== newSig) {
+          const isSignatureChange = oldSig.split('(')[0] !== (newSig ?? '').split('(')[0];
+          diffs.push({
+            nodeId: id,
+            change: isSignatureChange ? 'signature_changed' : 'body_only',
+            oldSignature: oldSig,
+            newSignature: newSig ?? undefined,
+          });
         }
       }
     }
@@ -68,11 +99,11 @@ export function diffSymbols(
 // Compute impact of symbol-level diffs
 export function computeDiffImpact(
   store: GraphStore,
-  base: string,
-  head: string,
+  repoPath: string = '.',
   changedPaths?: string[]
 ): DiffImpactResult {
-  const changedSymbols = diffSymbols(store, base, head, changedPaths);
+  const paths = changedPaths && changedPaths.length > 0 ? changedPaths : getGitChangedFiles(repoPath);
+  const changedSymbols = diffSymbols(store, repoPath, paths);
 
   // Compute union impact of all changed symbols
   const startIds = changedSymbols.map(d => d.nodeId);
@@ -86,15 +117,15 @@ export function computeDiffImpact(
   const contractDeltas: string[] = [];
   const contractNodes = store.listNodes('Contract');
   for (const cn of contractNodes) {
-    if (changedPaths?.some(p => cn.path?.includes(p))) {
+    if (paths?.some(p => cn.path?.includes(p))) {
       contractDeltas.push(cn.id);
     }
   }
 
   return {
     ok: true,
-    base,
-    head,
+    base: 'git-diff',
+    head: 'local-disk',
     changedSymbols,
     impact,
     contractDeltas,

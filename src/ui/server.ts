@@ -599,6 +599,10 @@ function getHTML(): string {
     let hoveredNode = null;
     let currentView = 'all';
 
+    // Zoom and Filtering active state trackers
+    let currentZoomScale = 0.8;
+    let currentActiveIds = null;
+
     // Map each unique subdirectory directory tree to a base color
     let directoryColorMap = {};
 
@@ -610,6 +614,57 @@ function getHTML(): string {
     const nodesLayer = mainGroup.select("g#nodes-layer");
 
     let simulation, zoomBehavior;
+
+    // Helper to dynamically update label opacities based on zoom and filter status
+    function updateLabelOpacities() {
+      const k = currentZoomScale;
+      nodesLayer.selectAll("text.node-label")
+        .style("opacity", d => {
+          const isSelected = selectedNode && d.id === selectedNode.id;
+          const isHovered = hoveredNode && d.id === hoveredNode.id;
+          const isCrucial = isSelected || isHovered;
+          if (isCrucial) return 1.0;
+          
+          const isActive = !currentActiveIds || currentActiveIds.has(d.id);
+          if (!isActive) return 0.05; // heavily faded because of active tab filter
+          
+          if (k < 0.25) return 0.0; // Hide everything at very far zoom
+          if (k < 0.45) {
+            // Show only high-level files, APIs, Tables, Services
+            if (d.kind === 'File' || d.kind === 'API' || d.kind === 'Table' || d.kind === 'Service') {
+              return 0.55;
+            }
+            return 0.0; // Hide others completely at this zoom
+          }
+          if (k < 0.65) {
+            // Partially fade minor nodes
+            if (d.kind === 'Function' || d.kind === 'Method' || d.kind === 'Interface') {
+              return 0.2;
+            }
+            return 0.7;
+          }
+          // Normal close zoom: default or high opacity
+          return d.kind === 'File' ? 0.5 : 0.9;
+        })
+        .style("display", d => {
+          const isSelected = selectedNode && d.id === selectedNode.id;
+          const isHovered = hoveredNode && d.id === hoveredNode.id;
+          const isCrucial = isSelected || isHovered;
+          if (isCrucial) return "block";
+
+          const isActive = !currentActiveIds || currentActiveIds.has(d.id);
+          if (!isActive) return "block"; // let it stay block but faded
+
+          if (k < 0.25) return "none";
+          if (k < 0.45) {
+            if (d.kind === 'File' || d.kind === 'API' || d.kind === 'Table' || d.kind === 'Service') {
+              return "block";
+            }
+            return "none";
+          }
+          return "block";
+        });
+    }
 
     // Initialize application
     async function init() {
@@ -658,6 +713,8 @@ function getHTML(): string {
           .scaleExtent([0.1, 8])
           .on("zoom", (event) => {
             mainGroup.attr("transform", event.transform);
+            currentZoomScale = event.transform.k;
+            updateLabelOpacities();
           });
 
         svg.call(zoomBehavior);
@@ -668,14 +725,36 @@ function getHTML(): string {
         const height = svgNode ? svgNode.clientHeight || svgNode.getBoundingClientRect().height : window.innerHeight;
         svg.call(zoomBehavior.transform, d3.zoomIdentity.translate(width / 2, height / 2).scale(0.8));
 
-        // 4. Set up Force Physics Simulation ("Flow Free" fluid physics)
+        // 4. Set up Force Physics Simulation ("Flow Free" fluid physics) with dynamic layout scaling
+        const layoutScale = Math.max(1.0, Math.min(3.5, allNodes.length / 25));
+
         simulation = d3.forceSimulation(allNodes)
           .velocityDecay(0.25) // Low friction for elegant floating momentum
-          .force("link", d3.forceLink(validEdges).id(d => d.id).distance(d => d.type === 'CONTAINS' ? 80 : 200).strength(0.15)) // Looser connections
-          .force("charge", d3.forceManyBody().strength(-500)) // Wide, unconstrained node repulsion
+          .force("link", d3.forceLink(validEdges)
+            .id(d => d.id)
+            .distance(d => {
+              if (d.type === 'CONTAINS') {
+                return 45; // Pull functions/methods/classes extremely close towards their containing file!
+              }
+              if (d.type === 'IMPORTS') {
+                return 420 * layoutScale; // Keep imports spaced far out to the side
+              }
+              if (d.type === 'CALLS') {
+                return 280 * layoutScale; // Call graphs should have plenty of space
+              }
+              return 220 * layoutScale;   // Default fallback
+            })
+            .strength(d => {
+              if (d.type === 'CONTAINS') {
+                return 0.85; // Rigid anchoring so children group tightly around their parent file
+              }
+              return 0.12;   // Elegant looser connection for structural relationships
+            })
+          )
+          .force("charge", d3.forceManyBody().strength(-550 * Math.pow(layoutScale, 1.5))) // Wide, unconstrained node repulsion
           .force("x", d3.forceX(0).strength(0.03)) // Gentle axial gravity
           .force("y", d3.forceY(0).strength(0.03))
-          .force("collision", d3.forceCollide().radius(d => getRadius(d) + 25)) // Expanded breathing buffer
+          .force("collision", d3.forceCollide().radius(d => (getRadius(d) + 25) * Math.sqrt(layoutScale))) // Expanded breathing buffer
           .on("tick", ticked);
 
         // 5. Register Event Listeners
@@ -763,6 +842,13 @@ function getHTML(): string {
         .attr("d", d => {
           const from = d.source;
           const to = d.target;
+          if (d.type === 'IMPORTS') {
+            const dx = to.x - from.x;
+            const dy = to.y - from.y;
+            const dr = Math.sqrt(dx * dx + dy * dy);
+            // Draw a curved arc for imports so they sweep to the side instead of crowding the center
+            return 'M' + from.x + ',' + from.y + ' A' + (dr * 1.25) + ',' + (dr * 1.25) + ' 0 0,1 ' + to.x + ',' + to.y;
+          }
           return 'M' + from.x + ',' + from.y + ' L' + to.x + ',' + to.y;
         });
 
@@ -775,6 +861,7 @@ function getHTML(): string {
       const activeKind = currentView;
       const filterNodes = activeKind === 'all' ? allNodes : allNodes.filter(n => n.kind === activeKind);
       const activeIds = new Set(filterNodes.map(n => n.id));
+      currentActiveIds = activeIds;
 
       // Draw lines (Links)
       const linkSelection = linksLayer.selectAll("path.link")
@@ -913,8 +1000,10 @@ function getHTML(): string {
         const el = d3.select(this);
         const matchesType = activeIds.has(d.id);
         el.classed("fade", !matchesType);
-        el.select("text.node-label").style("opacity", matchesType ? (d.kind === 'File' ? 0.4 : 0.8) : 0.05);
       });
+
+      // Update dynamic label opacities based on zoom and filter
+      updateLabelOpacities();
 
       // Restart force physics
       simulation.alpha(0.3).restart();
@@ -936,6 +1025,7 @@ function getHTML(): string {
           .attr("filter", null)
           .attr("transform", "scale(1)")
           .attr("stroke-width", d => d.kind === 'File' ? 2 : 1.5);
+        updateLabelOpacities();
         return;
       }
 
@@ -978,6 +1068,9 @@ function getHTML(): string {
           .classed("fade", !matches)
           .attr("marker-end", d => matches ? "url(#arrow-" + d.type + "-highlight)" : "url(#arrow-" + d.type + ")");
       });
+
+      // Update label opacities during hover spotlight to highlight relevant names
+      updateLabelOpacities();
     }
 
     // Trigger explosive Press Particle ripple effect on click
