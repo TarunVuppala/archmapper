@@ -1,31 +1,25 @@
-// UI server — localhost visualizer with horizontal hierarchical layout.
-// Pure canvas, no CDN dependencies, guaranteed to work.
+// UI server — localhost visualizer over the ONE graph.
+// Serves an interactive architecture visualizer.
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { execSync } from 'node:child_process';
+import { existsSync, writeFileSync, readFileSync } from 'node:fs';
+import { join, extname } from 'node:path';
 import { GraphStore } from '../core/store.js';
 import { computeImpact } from '../core/impact.js';
 import { healthCheck } from '../core/health.js';
 import { envelope } from '../core/types.js';
-import { projectView } from '../core/views.js';
-import { computeInsights } from '../core/insights.js';
-import { explainImpact } from '../core/explain.js';
-import type { ViewMode } from '../core/types.js';
 
 const DEFAULT_PORT = 3743;
 
-function getGitDiff(): string[] {
-  try {
-    const out = execSync('git diff --name-only HEAD~1 2>/dev/null || git diff --name-only 2>/dev/null || git ls-files --others --exclude-standard 2>/dev/null', {
-      encoding: 'utf-8',
-      timeout: 5000,
+function parseBody(req: IncomingMessage): Promise<any> {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+    req.on('end', () => {
+      try { resolve(data ? JSON.parse(data) : {}); } catch { resolve({}); }
     });
-    return out.trim().split('\n').filter(Boolean);
-  } catch {
-    return [];
-  }
+    req.on('error', reject);
+  });
 }
 
 function getHTML(): string {
@@ -461,6 +455,46 @@ function getHTML(): string {
       pointer-events: none;
     }
 
+    /* Natural Language Impact Summary Card Styles */
+    .impact-prediction-card {
+      background: rgba(202, 62, 28, 0.04);
+      border: 1px solid rgba(202, 62, 28, 0.25);
+      border-radius: 6px;
+      padding: 16px;
+      margin-top: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    }
+    .prediction-title {
+      font-family: 'Oswald', sans-serif;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      color: var(--primary);
+      text-transform: uppercase;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .prediction-text {
+      font-size: 12.5px;
+      line-height: 1.55;
+      color: #eae7e2;
+    }
+    .prediction-item {
+      display: flex;
+      gap: 8px;
+      font-size: 12px;
+      line-height: 1.45;
+      color: #d1d5db;
+    }
+    .prediction-bullet {
+      color: var(--primary);
+      font-weight: bold;
+    }
+
     /* Scrollbar */
     ::-webkit-scrollbar {
       width: 4px;
@@ -478,12 +512,33 @@ function getHTML(): string {
   </style>
 </head>
 <body>
-<div id="app">
-  <!-- Left Sidebar -->
-  <div id="sidebar">
-    <div class="sidebar-header">
-      <div class="brand">⬡ <span>Archmap</span></div>
-      <div class="tagline">If you change this, what breaks? And why?</div>
+  <div id="app">
+    <!-- Left Panel -->
+    <div id="sidebar">
+      <h1 class="brand">⬡ <span>Archmap</span></h1>
+      
+      <div class="stats" id="stats">
+        <div class="stat">
+          <div class="stat-value" id="stat-nodes">0</div>
+          <div class="stat-label">Nodes</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" id="stat-edges">0</div>
+          <div class="stat-label">Edges</div>
+        </div>
+      </div>
+
+      <div class="search-container">
+        <input class="search" id="search" placeholder="Search codebase symbols..." />
+      </div>
+
+      <div class="tab-bar">
+        <!-- Dynamically generated based on present kinds -->
+      </div>
+
+      <div class="node-list-container">
+        <ul class="node-list" id="nodeList"></ul>
+      </div>
     </div>
 
     <!-- Center Visualization Screen -->
@@ -558,36 +613,13 @@ function getHTML(): string {
         </g>
       </svg>
     </div>
-    
-    <div class="search-wrap">
-      <input class="search-input" id="search" placeholder="Search symbols..." />
-    </div>
-    
-    <div class="filter-bar" id="filters"></div>
-    
-    <div class="diff-section" id="diff-section" style="display:none">
-      <div class="diff-title"><span class="dot"></span>Changed Files</div>
-      <div id="diff-list"></div>
-      <div class="diff-count" id="diff-count"></div>
-    </div>
-    
-    <div class="node-list-wrap">
-      <ul class="node-list" id="nodelist"></ul>
+
+    <!-- Right Slide Detail Sidebar -->
+    <div id="detail-panel">
+      <button class="close-detail" id="closeDetail">✕</button>
+      <div id="detailContent"></div>
     </div>
   </div>
-  
-  <!-- Canvas -->
-  <div id="canvas-wrap">
-    <canvas id="graph"></canvas>
-    <div class="zoom-badge" id="zoom-badge">100%</div>
-    
-    <!-- Detail panel -->
-    <div id="detail">
-      <button class="detail-close" id="detail-close">✕</button>
-      <div id="detail-content"></div>
-    </div>
-  </div>
-</div>
 
   <script>
     // Complementary Base Palette for Directory-Tree Coloring (terracotta orange, deep purple, earthy beige, maroon #872341)
@@ -601,8 +633,11 @@ function getHTML(): string {
       '#0284c7'  // Sky Blue
     ];
 
-// Layout data: { x, y, width, height } per node
-let layout = new Map();
+    let allNodes = [];
+    let allEdges = [];
+    let selectedNode = null;
+    let hoveredNode = null;
+    let currentView = 'all';
 
     // Map each unique subdirectory directory tree to a base color
     let directoryColorMap = {};
@@ -614,17 +649,7 @@ let layout = new Map();
     const pulsesLayer = mainGroup.select("g#pulses-layer");
     const nodesLayer = mainGroup.select("g#nodes-layer");
 
-// ── Canvas setup ──
-function resizeCanvas() {
-  const wrap = document.getElementById('canvas-wrap');
-  canvas.width = wrap.clientWidth * devicePixelRatio;
-  canvas.height = wrap.clientHeight * devicePixelRatio;
-  canvas.style.width = wrap.clientWidth + 'px';
-  canvas.style.height = wrap.clientHeight + 'px';
-  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
-}
-window.addEventListener('resize', () => { resizeCanvas(); render(); });
-resizeCanvas();
+    let simulation, zoomBehavior;
 
     // Initialize application
     async function init() {
@@ -706,53 +731,14 @@ resizeCanvas();
           list.innerHTML = '<li style="padding: 12px; color: #ff5ca0; font-size:12px;">Crash: ' + err.message + '</li>';
         }
       }
-      visited.add(child);
-      layers.set(child, L + 1);
-      maxLayer = Math.max(maxLayer, L + 1);
-      queue.push(child);
     }
-  }
-  
-  // Assign remaining unvisited nodes
-  for (const n of nodes) {
-    if (!layers.has(n.id)) {
-      layers.set(n.id, maxLayer + 1);
-      maxLayer++;
+
+    function getRadius(d) {
+      if (d.kind === 'File') return 8;
+      if (d.kind === 'API' || d.kind === 'Table') return 15;
+      if (d.kind === 'Class') return 13;
+      return 10; // functions & others
     }
-  }
-  
-  // Group by layer
-  const byLayer = new Map();
-  for (const n of nodes) {
-    const L = layers.get(n.id) || 0;
-    if (!byLayer.has(L)) byLayer.set(L, []);
-    byLayer.get(L).push(n);
-  }
-  
-  // Position: horizontal spacing = 280px per layer, vertical spacing = 60px per node
-  const H_GAP = 280;
-  const V_GAP = 60;
-  const NODE_W = 140;
-  const NODE_H = 32;
-  
-  const result = new Map();
-  for (const [L, layerNodes] of byLayer) {
-    const totalH = layerNodes.length * V_GAP;
-    layerNodes.forEach((n, i) => {
-      result.set(n.id, {
-        x: L * H_GAP,
-        y: i * V_GAP - totalH / 2,
-        w: NODE_W,
-        h: NODE_H,
-        layer: L,
-        name: n.name,
-        kind: n.kind
-      });
-    });
-  }
-  
-  return result;
-}
 
     // Classify nodes into directory trees and build directory color index
     function getDirectory(n) {
@@ -793,283 +779,31 @@ resizeCanvas();
       const presentKinds = new Set(allNodes.map(n => n.kind));
       let html = '<button class="tab active" data-view="all">All</button>';
       
-      const sz = isHighlighted ? 8 : 5;
-      ctx.beginPath();
-      ctx.moveTo(ax, ay);
-      ctx.lineTo(ax - sz * Math.cos(angle - 0.4), ay - sz * Math.sin(angle - 0.4));
-      ctx.lineTo(ax - sz * Math.cos(angle + 0.4), ay - sz * Math.sin(angle + 0.4));
-      ctx.closePath();
-      ctx.fillStyle = isHighlighted ? (EDGE_HIGHLIGHT[e.type] || '#60a5fa') : (EDGE_COLORS[e.type] || 'rgba(148,163,184,0.3)');
-      ctx.fill();
+      const orderedKinds = ['Function', 'Method', 'Class', 'Interface', 'Table', 'API', 'File', 'External', 'Test'];
+      orderedKinds.forEach(kind => {
+        if (presentKinds.has(kind)) {
+          const label = kind === 'Function' ? 'Functions' :
+                        kind === 'Method' ? 'Methods' :
+                        kind === 'Class' ? 'Classes' :
+                        kind === 'Interface' ? 'Interfaces' :
+                        kind === 'Table' ? 'Tables' :
+                        kind === 'API' ? 'APIs' :
+                        kind === 'File' ? 'Files' :
+                        kind === 'External' ? 'Externals' :
+                        kind === 'Test' ? 'Tests' : kind;
+          html += '<button class="tab" data-view="' + kind + '">' + label + '</button>';
+        }
+      });
+      tabContainer.innerHTML = html;
     }
-  }
-  
-  ctx.globalAlpha = 1;
-  
-  // Draw nodes
-  for (const n of allNodes) {
-    const pos = layout.get(n.id);
-    if (!pos) continue;
-    
-    const isVisible = activeFilter === 'all' || n.kind === activeFilter;
-    const isHovered = hovered && hovered.id === n.id;
-    const isSelected = selected && selected.id === n.id;
-    const isConnected = selected && isNodeConnected(n.id);
-    const isFaded = selected && !isSelected && !isConnected;
-    
-    if (isFaded) { ctx.globalAlpha = 0.1; }
-    else if (!isVisible) { ctx.globalAlpha = 0.08; }
-    else { ctx.globalAlpha = 1; }
-    
-    const color = KIND_COLORS[n.kind] || '#64748b';
-    const r = 6; // border radius
-    
-    // Node rectangle
-    ctx.beginPath();
-    roundRect(ctx, pos.x, pos.y, pos.w, pos.h, r);
-    
-    if (isHovered || isSelected) {
-      ctx.fillStyle = color + '30';
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 2;
-      ctx.shadowColor = color;
-      ctx.shadowBlur = 12;
-    } else {
-      ctx.fillStyle = color + '18';
-      ctx.strokeStyle = color + '50';
-      ctx.lineWidth = 1;
-      ctx.shadowBlur = 0;
-    }
-    ctx.fill();
-    ctx.stroke();
-    ctx.shadowBlur = 0;
-    
-    // Kind indicator bar on left
-    ctx.beginPath();
-    roundRectLeft(ctx, pos.x, pos.y, 4, pos.h, r);
-    ctx.fillStyle = color;
-    ctx.fill();
-    
-    // Node name
-    const maxTextW = pos.w - 16;
-    ctx.font = '600 11px Inter, system-ui, sans-serif';
-    ctx.fillStyle = isFaded ? '#475569' : (isSelected || isHovered ? '#ffffff' : color);
-    ctx.textBaseline = 'middle';
-    ctx.textAlign = 'left';
-    let label = pos.name;
-    if (ctx.measureText(label).width > maxTextW) {
-      while (ctx.measureText(label + '…').width > maxTextW && label.length > 3) label = label.slice(0, -1);
-      label += '…';
-    }
-    ctx.fillText(label, pos.x + 12, pos.y + pos.h / 2);
-    
-    // Kind badge on right
-    ctx.font = '700 8px Inter, system-ui, sans-serif';
-    const kindLabel = n.kind.slice(0, 4).toUpperCase();
-    const kindW = ctx.measureText(kindLabel).width + 8;
-    ctx.fillStyle = color + '25';
-    ctx.beginPath();
-    roundRect(ctx, pos.x + pos.w - kindW - 6, pos.y + pos.h / 2 - 7, kindW, 14, 3);
-    ctx.fill();
-    ctx.fillStyle = color;
-    ctx.textAlign = 'center';
-    ctx.fillText(kindLabel, pos.x + pos.w - kindW / 2 - 6, pos.y + pos.h / 2 + 1);
-  }
-  
-  ctx.globalAlpha = 1;
-  ctx.restore();
-}
 
-// ── Bezier helper ──
-function bezierPoint(p0, p1, p2, p3, t) {
-  const u = 1 - t;
-  return u*u*u*p0 + 3*u*u*t*p1 + 3*u*t*t*p2 + t*t*t*p3;
-}
-
-// ── Rounded rect helpers ──
-function roundRect(ctx, x, y, w, h, r) {
-  ctx.moveTo(x + r, y);
-  ctx.lineTo(x + w - r, y);
-  ctx.arcTo(x + w, y, x + w, y + r, r);
-  ctx.lineTo(x + w, y + h - r);
-  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
-  ctx.lineTo(x + r, y + h);
-  ctx.arcTo(x, y + h, x, y + h - r, r);
-  ctx.lineTo(x, y + r);
-  ctx.arcTo(x, y, x + r, y, r);
-  ctx.closePath();
-}
-
-function roundRectLeft(ctx, x, y, w, h, r) {
-  ctx.moveTo(x + r, y);
-  ctx.lineTo(x + w, y);
-  ctx.lineTo(x + w, y + h);
-  ctx.lineTo(x + r, y + h);
-  ctx.arcTo(x, y + h, x, y + h - r, r);
-  ctx.lineTo(x, y + r);
-  ctx.arcTo(x, y, x + r, y, r);
-  ctx.closePath();
-}
-
-// ── Connectivity check ──
-function isNodeConnected(id) {
-  if (!selected) return false;
-  for (const e of validEdges) {
-    if ((e.from === selected.id && e.to === id) || (e.to === selected.id && e.from === id)) return true;
-  }
-  return false;
-}
-
-// ── Hit test: find node under mouse ──
-function hitTest(mx, my) {
-  const W = canvas.width / devicePixelRatio;
-  const H = canvas.height / devicePixelRatio;
-  const worldX = (mx - W / 2 - camX) / camZoom;
-  const worldY = (my - H / 2 - camY) / camZoom;
-  
-  for (let i = allNodes.length - 1; i >= 0; i--) {
-    const n = allNodes[i];
-    const pos = layout.get(n.id);
-    if (!pos) continue;
-    if (worldX >= pos.x && worldX <= pos.x + pos.w && worldY >= pos.y && worldY <= pos.y + pos.h) {
-      return n;
-    }
-  }
-  return null;
-}
-
-// ── Mouse events ──
-canvas.addEventListener('mousedown', e => {
-  const node = hitTest(e.offsetX, e.offsetY);
-  if (node) {
-    selectNode(node.id);
-    return;
-  }
-  dragging = true;
-  dragStartX = e.clientX;
-  dragStartY = e.clientY;
-  camStartX = camX;
-  camStartY = camY;
-  canvas.style.cursor = 'grabbing';
-});
-
-canvas.addEventListener('mousemove', e => {
-  if (dragging) {
-    camX = camStartX + (e.clientX - dragStartX);
-    camY = camStartY + (e.clientY - dragStartY);
-    render();
-    return;
-  }
-  const node = hitTest(e.offsetX, e.offsetY);
-  if (node !== hovered) {
-    hovered = node;
-    canvas.style.cursor = node ? 'pointer' : 'grab';
-    render();
-  }
-});
-
-canvas.addEventListener('mouseup', () => {
-  dragging = false;
-  canvas.style.cursor = hovered ? 'pointer' : 'grab';
-});
-
-canvas.addEventListener('mouseleave', () => {
-  hovered = null;
-  render();
-});
-
-canvas.addEventListener('wheel', e => {
-  e.preventDefault();
-  const factor = e.deltaY > 0 ? 0.9 : 1.1;
-  camZoom = Math.max(0.05, Math.min(5, camZoom * factor));
-  document.getElementById('zoom-badge').textContent = Math.round(camZoom * 100) + '%';
-  render();
-}, { passive: false });
-
-// ── Sidebar list ──
-function renderList(query = '') {
-  const list = document.getElementById('nodelist');
-  const filtered = allNodes.filter(n => {
-    const matchKind = activeFilter === 'all' || n.kind === activeFilter;
-    const matchQ = !query || n.name.toLowerCase().includes(query.toLowerCase()) || (n.path || '').toLowerCase().includes(query.toLowerCase());
-    return matchKind && matchQ;
-  });
-  
-  list.innerHTML = filtered.slice(0, 200).map(n => {
-    const c = KIND_COLORS[n.kind] || '#64748b';
-    return '<li class="node-item' + (selected && selected.id === n.id ? ' selected' : '') + '" data-id="' + n.id + '">'
-      + '<span class="node-dot" style="background:' + c + '"></span>'
-      + '<div class="node-text"><div class="node-nm" style="color:' + c + '">' + esc(n.name) + '</div>'
-      + '<div class="node-pth">' + esc(n.path || n.id) + '</div></div>'
-      + '<span class="node-badge" style="background:' + c + '20;color:' + c + ';border:1px solid ' + c + '40">' + n.kind.slice(0, 4) + '</span>'
-      + '</li>';
-  }).join('');
-  
-  // Click handlers
-  list.querySelectorAll('.node-item').forEach(el => {
-    el.addEventListener('click', () => selectNode(el.dataset.id));
-  });
-}
-
-// ── Select node ──
-function selectNode(id) {
-  selected = allNodes.find(n => n.id === id) || null;
-  renderList(document.getElementById('search').value);
-  render();
-  if (selected) showDetail(selected);
-  else document.getElementById('detail').classList.remove('open');
-}
-
-// ── Detail panel ──
-async function showDetail(node) {
-  const panel = document.getElementById('detail');
-  const content = document.getElementById('detail-content');
-  panel.classList.add('open');
-  content.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-dim);">Analyzing...</div>';
-  
-  try {
-    const [neighborsData, impactData] = await Promise.all([
-      fetch('/api/neighbors/' + encodeURIComponent(node.id)).then(r => r.json()),
-      fetch('/api/impact/' + encodeURIComponent(node.id)).then(r => r.json())
-    ]);
-    
-    const neighbors = neighborsData.edges || [];
-    const neighborNodes = neighborsData.nodes || [];
-    const impact = (impactData.data || impactData);
-    const counts = impact.counts || {};
-    const totalImpact = Object.values(counts).reduce((a, b) => a + b, 0);
-    
-    const c = KIND_COLORS[node.kind] || '#64748b';
-    let h = '';
-    
-    h += '<span class="detail-badge" style="background:' + c + '20;color:' + c + ';border:1px solid ' + c + '40">' + node.kind + '</span>';
-    h += '<div class="detail-title" style="color:' + c + '">' + esc(node.name) + '</div>';
-    h += '<div class="detail-sub">' + esc(node.id) + '</div>';
-    
-    if (node.path) h += '<div class="detail-path">📄 ' + esc(node.path) + (node.startLine ? ':' + node.startLine : '') + '</div>';
-    if (node.signature) h += '<div class="detail-section"><div class="detail-section-title">Signature</div><div class="detail-sig">' + esc(node.signature) + '</div></div>';
-    
-    // Impact
-    h += '<div class="detail-section"><div class="detail-section-title">Impact (' + totalImpact + ' affected)</div>';
-    if (impact.riskChips && impact.riskChips.length > 0) {
-      impact.riskChips.forEach(r => { h += '<span class="risk-tag risk-' + r.kind + '">⬡ ' + esc(r.message) + '</span>'; });
-    } else {
-      h += '<div style="font-size:12px;color:var(--text-dim)">No critical risks</div>';
-    }
-    h += '</div>';
-    
-    // Why paths
-    if (impact.paths && impact.paths.length > 0) {
-      h += '<div class="detail-section"><div class="detail-section-title">Dependency Flows</div>';
-      impact.paths.slice(0, 4).forEach(p => {
-        h += '<div class="path-flow">';
-        p.steps.forEach(s => {
-          const fc = KIND_COLORS[s.fromType] || '#fff';
-          const tc = KIND_COLORS[s.toType] || '#fff';
-          h += '<div class="path-step"><span style="color:' + fc + ';font-weight:600">' + esc(s.from.split(':').pop()) + '</span>'
-            + '<span class="path-arrow">→</span>'
-            + '<span style="color:' + tc + '">' + esc(s.to.split(':').pop()) + '</span>'
-            + '<span style="color:var(--text-dim);font-size:10px">[' + s.edgeType + ']</span></div>';
+    // Force Simulation update ticks
+    function ticked() {
+      linksLayer.selectAll("path.link")
+        .attr("d", d => {
+          const from = d.source;
+          const to = d.target;
+          return 'M' + from.x + ',' + from.y + ' L' + to.x + ',' + to.y;
         });
 
       nodesLayer.selectAll("g.node-g")
@@ -1221,33 +955,10 @@ async function showDetail(node) {
         el.classed("fade", !matchesType);
         el.select("text.node-label").style("opacity", matchesType ? (d.kind === 'File' ? 0.4 : 0.8) : 0.05);
       });
-      h += '</div>';
+
+      // Restart force physics
+      simulation.alpha(0.3).restart();
     }
-    
-    // Connections
-    h += '<div class="detail-section"><div class="detail-section-title">Connections (' + neighbors.length + ')</div>';
-    neighbors.forEach((e, i) => {
-      const sn = neighborNodes[i] || { name: e.to, kind: 'Unknown' };
-      const isOut = e.from === node.id;
-      const nc = KIND_COLORS[sn.kind] || '#94a3b8';
-      const ec = EDGE_HIGHLIGHT[e.type] || '#64748b';
-      h += '<div class="conn-item" data-goto="' + esc(sn.id) + '">'
-        + '<span style="color:' + nc + ';font-weight:600">' + esc(sn.name) + ' <span style="color:var(--text-dim);font-size:10px">' + sn.kind + '</span></span>'
-        + '<span style="color:' + ec + ';font-size:11px;font-weight:700">' + (isOut ? '→' : '←') + ' ' + e.type + '</span></div>';
-    });
-    if (neighbors.length === 0) h += '<div style="font-size:12px;color:var(--text-dim)">Isolated</div>';
-    h += '</div>';
-    
-    content.innerHTML = h;
-    
-    // Click connections to navigate
-    content.querySelectorAll('.conn-item[data-goto]').forEach(el => {
-      el.addEventListener('click', () => selectNode(el.dataset.goto));
-    });
-  } catch (err) {
-    content.innerHTML = '<div style="color:#f87171;text-align:center;padding:40px">Failed to load details</div>';
-  }
-}
 
     // Hover Highlight Spotlight Spotlight with hardware-accelerated transforms
     function setNodeHover(node, isHover) {
@@ -1268,55 +979,21 @@ async function showDetail(node) {
         return;
       }
 
-function buildFilters() {
-  const kinds = {};
-  allNodes.forEach(n => { kinds[n.kind] = (kinds[n.kind] || 0) + 1; });
-  const ordered = ['Function', 'Method', 'Class', 'Interface', 'Table', 'API', 'Route', 'External', 'Test', 'Module', 'Package', 'File', 'Service'];
-  let h = '<button class="filter-btn active" data-f="all">All</button>';
-  ordered.forEach(k => {
-    if (kinds[k]) h += '<button class="filter-btn" data-f="' + k + '">' + k + (kinds[k] > 1 ? ' (' + kinds[k] + ')' : '') + '</button>';
-  });
-  document.getElementById('filters').innerHTML = h;
-  document.getElementById('filters').addEventListener('click', e => {
-    const btn = e.target.closest('.filter-btn');
-    if (!btn) return;
-    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    activeFilter = btn.dataset.f;
-    renderList(document.getElementById('search').value);
-    render();
-  });
-}
+      // Spotlight effect: find 1st degree connected symbols
+      const connectedNodeIds = new Set([node.id]);
+      const connectedLinkIds = new Set();
 
-async function loadDiff() {
-  try {
-    const data = await fetch('/api/diff').then(r => r.json());
-    const files = data.files || [];
-    if (files.length === 0) return;
-    diffFiles = files;
-    
-    const section = document.getElementById('diff-section');
-    const list = document.getElementById('diff-list');
-    section.style.display = 'block';
-    list.innerHTML = files.slice(0, 15).map(f =>
-      '<div class="diff-file" data-file="' + esc(f) + '">' + esc(f) + '</div>'
-    ).join('');
-    document.getElementById('diff-count').textContent = files.length + ' changed file' + (files.length !== 1 ? 's' : '');
-    
-    list.querySelectorAll('.diff-file').forEach(el => {
-      el.addEventListener('click', async () => {
-        const fname = el.dataset.file;
-        const res = await fetch('/api/diff-impact?file=' + encodeURIComponent(fname)).then(r => r.json());
-        if (res.nodes) {
-          // Highlight impacted nodes
-          const impactedIds = new Set(res.nodes.map(n => n.id));
-          selected = null;
-          render();
+      allEdges.forEach(edge => {
+        const srcId = typeof edge.source === 'object' ? edge.source.id : edge.source;
+        const tgtId = typeof edge.target === 'object' ? edge.target.id : edge.target;
+        if (srcId === node.id) {
+          connectedNodeIds.add(tgtId);
+          connectedLinkIds.add(edge.id);
+        } else if (tgtId === node.id) {
+          connectedNodeIds.add(srcId);
+          connectedLinkIds.add(edge.id);
         }
       });
-    });
-  } catch {}
-}
 
       // Apply transitions & glows
       nodesLayer.selectAll("g.node-g").each(function(d) {
@@ -1330,23 +1007,18 @@ async function loadDiff() {
           .attr("stroke-width", isHoverTarget ? 3.5 : (d.kind === 'File' ? 2 : 1.5))
           .attr("filter", isHoverTarget ? "url(#glow)" : null);
 
-// ── Close detail ──
-document.getElementById('detail-close').addEventListener('click', () => {
-  selected = null;
-  document.getElementById('detail').classList.remove('open');
-  renderList(document.getElementById('search').value);
-  render();
-});
+        el.select("text.node-label")
+          .classed("active", isHoverTarget);
+      });
 
-// ── Keyboard ──
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') {
-    selected = null;
-    document.getElementById('detail').classList.remove('open');
-    renderList(document.getElementById('search').value);
-    render();
-  }
-});
+      linksLayer.selectAll("path.link").each(function(d) {
+        const matches = connectedLinkIds.has(d.id);
+        d3.select(this)
+          .classed("highlight", matches)
+          .classed("fade", !matches)
+          .attr("marker-end", d => matches ? "url(#arrow-" + d.type + "-highlight)" : "url(#arrow-" + d.type + ")");
+      });
+    }
 
     // Trigger explosive Press Particle ripple effect on click
     function triggerPressEffect(event, d) {
@@ -1456,8 +1128,97 @@ document.addEventListener('keydown', e => {
         \`;
 
         if (node.path) {
-          html += \`<p style="font-size:12px; color:#ffffff; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom:12px; margin: 12px 0; font-weight:500;">📄 \${node.path}\${node.startLine ? ':' + node.startLine : ''}</p>\`;
+          html += '<p style="font-size:12px; color:#ffffff; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom:12px; margin: 12px 0; font-weight:500;">📄 ' + node.path + (node.startLine ? ':' + node.startLine : '') + '</p>';
         }
+
+        // Natural Language Impact Summary Card
+        const incomingCalls = neighbors.filter(e => e.to === node.id && e.type === 'CALLS');
+        const downstreamAPIs = [];
+        const downstreamTables = [];
+        
+        if (impact.paths) {
+          impact.paths.forEach(p => {
+            if (p.steps) {
+              p.steps.forEach(s => {
+                const toId = s.to;
+                const toName = toId.split(':').pop();
+                if (toId.startsWith('api:') && !downstreamAPIs.includes(toName)) {
+                  downstreamAPIs.push(toName);
+                } else if (toId.startsWith('table:') && !downstreamTables.includes(toName)) {
+                  downstreamTables.push(toName);
+                }
+              });
+            }
+          });
+        }
+
+        let riskRating = "LOW RISK";
+        let riskColor = "#34d399"; // emerald
+        const hasUntestedRisk = impact.riskChips && impact.riskChips.some(r => r.kind === 'untested');
+        const hasCriticalRisk = impact.riskChips && impact.riskChips.some(r => r.kind === 'critical' || r.kind === 'conflict');
+        
+        if (totalImpact > 10 || hasCriticalRisk) {
+          riskRating = "CRITICAL RISK";
+          riskColor = "#f87171"; // rose red
+        } else if (totalImpact > 3 || hasUntestedRisk) {
+          riskRating = "MEDIUM RISK";
+          riskColor = "#fbbf24"; // amber
+        }
+
+        let dynamicSummary = "If you modify this code, ";
+        if (node.kind === 'Function' || node.kind === 'Method') {
+          if (incomingCalls.length > 0) {
+            const callers = incomingCalls.slice(0, 2).map(e => e.from.split(':').pop()).join(', ');
+            const others = incomingCalls.length - 2;
+            dynamicSummary += 'which is directly invoked by <strong>' + callers + '</strong>' + (others > 0 ? ' and ' + others + ' others' : '') + ', ';
+          }
+          dynamicSummary += 'it will directly impact <strong>' + neighbors.length + ' connections</strong>. ';
+        } else if (node.kind === 'Class') {
+          dynamicSummary += "which holds core object structure and definitions, ";
+        } else if (node.kind === 'Table') {
+          dynamicSummary += "which represents persistent database storage, ";
+        } else if (node.kind === 'API') {
+          dynamicSummary += "which serves as a public HTTP routing gateway, ";
+        }
+
+        if (totalImpact > 0) {
+          dynamicSummary += 'the changes will propagate downstream across the graph to affect a total of <strong>' + totalImpact + ' modules</strong>.';
+        } else {
+          dynamicSummary += "there is no downstream propagation risk as this node is isolated.";
+        }
+
+        html += '<div class="impact-prediction-card">';
+        html += '  <div class="prediction-title">';
+        html += '    <span>⚡</span> Impact Inference (<span style="color:' + riskColor + '">' + riskRating + '</span>)';
+        html += '  </div>';
+        html += '  <p class="prediction-text">' + dynamicSummary + '</p>';
+
+        if (downstreamAPIs.length > 0) {
+          const apiSample = downstreamAPIs.slice(0, 3).join(', ');
+          const others = downstreamAPIs.length - 3;
+          html += '  <div class="prediction-item">';
+          html += '    <span class="prediction-bullet">▪</span>';
+          html += '    <span>Propagates to external public HTTP endpoints: <strong>' + apiSample + '</strong>' + (others > 0 ? ' and ' + others + ' others' : '') + '.</span>';
+          html += '  </div>';
+        }
+
+        if (downstreamTables.length > 0) {
+          const tableSample = downstreamTables.slice(0, 3).join(', ');
+          const others = downstreamTables.length - 3;
+          html += '  <div class="prediction-item">';
+          html += '    <span class="prediction-bullet">▪</span>';
+          html += '    <span>Affects database table read/writes: <strong>' + tableSample + '</strong>' + (others > 0 ? ' and ' + others + ' others' : '') + '.</span>';
+          html += '  </div>';
+        }
+
+        if (hasUntestedRisk) {
+          html += '  <div class="prediction-item">';
+          html += '    <span class="prediction-bullet">▪</span>';
+          html += '    <span><strong>Warning:</strong> Pathways are untested, meaning changes here have a higher regression probability.</span>';
+          html += '  </div>';
+        }
+
+        html += '</div>';
 
         if (node.signature) {
           html += \`
@@ -1660,46 +1421,12 @@ export async function startUIServer(port = DEFAULT_PORT): Promise<void> {
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = req.url ?? '/';
 
+    // API routes
     if (url === '/api/graph' && req.method === 'GET') {
-      const view = projectView(store, 'height');
+      const nodes = store.listNodes(undefined, 5000);
+      const edges = nodes.flatMap(n => store.getOutEdges(n.id));
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ nodes: view.nodes, edges: view.edges }));
-      return;
-    }
-
-    if (url.startsWith('/api/view') && req.method === 'GET') {
-      const q = new URL(url, 'http://127.0.0.1').searchParams;
-      const mode = (q.get('mode') || 'height') as ViewMode;
-      const focus = q.get('focus') || undefined;
-      const view = projectView(store, mode, focus || undefined);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(view));
-      return;
-    }
-
-    if (url === '/api/diff' && req.method === 'GET') {
-      const files = getGitDiff();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ files }));
-      return;
-    }
-
-    if (url.startsWith('/api/diff-impact') && req.method === 'GET') {
-      const q = new URL(url, 'http://127.0.0.1').searchParams;
-      const fname = q.get('file') || '';
-      // Find nodes in that file
-      const nodes = store.listNodesByKinds(['Function', 'Method', 'Class', 'Interface', 'API', 'Table', 'Test', 'Module', 'Route', 'External', 'Package'], 500)
-        .filter(n => n.path === fname || (n.path || '').startsWith(fname.replace(/\.[^.]+$/, '')));
-      const ids = new Set(nodes.map(n => n.id));
-      // Impact each
-      const allImpactNodes: any[] = [];
-      for (const n of nodes.slice(0, 5)) {
-        const impact = computeImpact(store, [n.id], { direction: 'downstream' });
-        allImpactNodes.push(...impact.nodes);
-      }
-      const uniqueNodes = [...new Map(allImpactNodes.map(n => [n.id, n])).values()];
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ nodes: uniqueNodes }));
+      res.end(JSON.stringify({ nodes, edges }));
       return;
     }
 
@@ -1723,26 +1450,6 @@ export async function startUIServer(port = DEFAULT_PORT): Promise<void> {
       return;
     }
 
-    if (url.startsWith('/api/explain/') && req.method === 'GET') {
-      const nodeId = decodeURIComponent(url.slice('/api/explain/'.length));
-      const node = store.resolveNode(nodeId);
-      if (!node) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, data: { error: 'not found' } }));
-        return;
-      }
-      const impact = computeImpact(store, [node.id], { direction: 'downstream' });
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(envelope(explainImpact(store, impact))));
-      return;
-    }
-
-    if (url === '/api/insights' && req.method === 'GET') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(envelope(computeInsights(store))));
-      return;
-    }
-
     if (url === '/api/health' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(envelope(healthCheck(store))));
@@ -1755,7 +1462,7 @@ export async function startUIServer(port = DEFAULT_PORT): Promise<void> {
   });
 
   server.listen(port, '127.0.0.1', () => {
-    console.log(`archmap visualizer at http://127.0.0.1:${port}`);
+    console.log(`archmap ui serving at http://127.0.0.1:${port}`);
   });
 
   process.on('SIGINT', () => {
@@ -1763,4 +1470,4 @@ export async function startUIServer(port = DEFAULT_PORT): Promise<void> {
     server.close();
     process.exit(0);
   });
-}
+}
