@@ -136,24 +136,37 @@ export function computeImpact(
     let relevantEdges: GraphEdge[];
 
     if (direction === 'downstream') {
-      // Downstream: what is affected if this node changes?
-      // Outgoing: things this node exposes, writes to, publishes to, calls
-      // Incoming: callers of this node, consumers of this node
-      relevantEdges = [
-        ...outgoing.filter(e =>
-          ['CALLS', 'EXPOSES', 'WRITES', 'PUBLISHES', 'TESTS', 'DEPENDS_ON'].includes(e.type)
-        ),
-        ...incoming.filter(e =>
-          ['CALLS', 'CONSUMES', 'SUBSCRIBES'].includes(e.type)
-        ),
-      ];
+      // Spec: CALLS inverse, EXPOSES, CONSUMES inverse, WRITES,
+      // PUBLISHES, TESTS inverse. Callees are upstream, not affected.
+      const isStart = startIds.includes(currentId);
+      const outKeep = outgoing.filter(e => {
+        if (e.type === 'EXPOSES') return true;
+        // Side effects (writes, events, externals) only count on the changed symbol.
+        if (!isStart) return false;
+        if (['WRITES', 'PUBLISHES'].includes(e.type)) return true;
+        if (e.type === 'CALLS') {
+          const t = store.getNode(e.to);
+          return t?.kind === 'External' || t?.kind === 'API' || t?.kind === 'Event';
+        }
+        return false;
+      });
+      const inKeep = incoming.filter(e =>
+        ['CALLS', 'CONSUMES', 'SUBSCRIBES', 'TESTS'].includes(e.type)
+      );
+      relevantEdges = [...outKeep, ...inKeep];
     } else {
-      // Upstream: what does this node depend on?
-      // Outgoing: CALLS→func, IMPORTS→module, READS→table, CONSUMES→api
-      // Incoming: callers of this node (who depends on me? — also upstream context)
       relevantEdges = outgoing.filter(e =>
         ['CALLS', 'IMPORTS', 'READS', 'CONSUMES', 'DEPENDS_ON'].includes(e.type)
       );
+    }
+
+    // Terminals are recorded but not expanded further.
+    if (
+      direction === 'downstream' &&
+      currentNode &&
+      (currentNode.kind === 'External' || currentNode.kind === 'Table' || currentNode.kind === 'Test')
+    ) {
+      continue;
     }
 
     for (const edge of relevantEdges) {
@@ -173,7 +186,21 @@ export function computeImpact(
         evidence: edge.evidence[0],
       };
 
-      queue.push([nextId, depth + 1, [...pathSoFar, step]]);
+      const nextPath = [...pathSoFar, step];
+      queue.push([nextId, depth + 1, nextPath]);
+
+      const nextNode = store.getNode(nextId);
+      if (
+        nextNode &&
+        paths.length < maxPaths &&
+        nextPath.length > 0 &&
+        ['Table', 'API', 'External', 'Service', 'Event', 'Test'].includes(nextNode.kind)
+      ) {
+        paths.push({
+          steps: nextPath,
+          evidence: nextPath.flatMap(s => (s.evidence ? [s.evidence] : [])),
+        });
+      }
 
       // Risk: DB writes
       if (edge.type === 'WRITES') {
@@ -235,13 +262,10 @@ export function computeImpact(
     }
   }
 
-  // Unchecked risk for nodes with no test
-  const functionNodes = nodes.filter(n =>
-    n.kind === 'Function' || n.kind === 'Method'
-  );
-  const testedIds = new Set(testsToRun);
-  // Simple heuristic: check if any TESTS edge points to function nodes
-  for (const fn of functionNodes) {
+  const starts = startIds
+    .map(id => store.getNode(id))
+    .filter((n): n is GraphNode => Boolean(n && (n.kind === 'Function' || n.kind === 'Method')));
+  for (const fn of starts.slice(0, 5)) {
     const testEdges = store.getInEdges(fn.id).filter(e => e.type === 'TESTS');
     if (testEdges.length === 0) {
       riskChips.push({
@@ -252,6 +276,26 @@ export function computeImpact(
     }
   }
 
+  const uniqueRisk: RiskChip[] = [];
+  const seenRisk = new Set<string>();
+  for (const r of riskChips) {
+    const key = `${r.kind}:${r.nodeId ?? r.message}`;
+    if (seenRisk.has(key)) continue;
+    seenRisk.add(key);
+    uniqueRisk.push(r);
+  }
+
+  // Deduplicate why-paths and keep the bound from the spec (≤ 7).
+  const uniquePaths: WhyPath[] = [];
+  const seenPaths = new Set<string>();
+  for (const p of paths) {
+    const key = p.steps.map(s => `${s.from}|${s.edgeType}|${s.to}`).join('>');
+    if (seenPaths.has(key) || p.steps.length === 0) continue;
+    seenPaths.add(key);
+    uniquePaths.push(p);
+    if (uniquePaths.length >= maxPaths) break;
+  }
+
   return {
     ok: true,
     startIds,
@@ -259,9 +303,9 @@ export function computeImpact(
     counts: counts as Record<import('./types.js').NodeKind, number>,
     nodes,
     edges,
-    paths,
+    paths: uniquePaths,
     testsToRun,
-    riskChips,
+    riskChips: uniqueRisk,
     docsForExternals,
     suggestedReviewers: [],
   };

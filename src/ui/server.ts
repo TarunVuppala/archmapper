@@ -455,6 +455,46 @@ function getHTML(): string {
       pointer-events: none;
     }
 
+    /* Natural Language Impact Summary Card Styles */
+    .impact-prediction-card {
+      background: rgba(202, 62, 28, 0.04);
+      border: 1px solid rgba(202, 62, 28, 0.25);
+      border-radius: 6px;
+      padding: 16px;
+      margin-top: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    }
+    .prediction-title {
+      font-family: 'Oswald', sans-serif;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      color: var(--primary);
+      text-transform: uppercase;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .prediction-text {
+      font-size: 12.5px;
+      line-height: 1.55;
+      color: #eae7e2;
+    }
+    .prediction-item {
+      display: flex;
+      gap: 8px;
+      font-size: 12px;
+      line-height: 1.45;
+      color: #d1d5db;
+    }
+    .prediction-bullet {
+      color: var(--primary);
+      font-weight: bold;
+    }
+
     /* Scrollbar */
     ::-webkit-scrollbar {
       width: 4px;
@@ -1181,8 +1221,97 @@ function getHTML(): string {
         \`;
 
         if (node.path) {
-          html += \`<p style="font-size:12px; color:#ffffff; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom:12px; margin: 12px 0; font-weight:500;">📄 \${node.path}\${node.startLine ? ':' + node.startLine : ''}</p>\`;
+          html += '<p style="font-size:12px; color:#ffffff; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom:12px; margin: 12px 0; font-weight:500;">📄 ' + node.path + (node.startLine ? ':' + node.startLine : '') + '</p>';
         }
+
+        // Natural Language Impact Summary Card
+        const incomingCalls = neighbors.filter(e => e.to === node.id && e.type === 'CALLS');
+        const downstreamAPIs = [];
+        const downstreamTables = [];
+        
+        if (impact.paths) {
+          impact.paths.forEach(p => {
+            if (p.steps) {
+              p.steps.forEach(s => {
+                const toId = s.to;
+                const toName = toId.split(':').pop();
+                if (toId.startsWith('api:') && !downstreamAPIs.includes(toName)) {
+                  downstreamAPIs.push(toName);
+                } else if (toId.startsWith('table:') && !downstreamTables.includes(toName)) {
+                  downstreamTables.push(toName);
+                }
+              });
+            }
+          });
+        }
+
+        let riskRating = "LOW RISK";
+        let riskColor = "#34d399"; // emerald
+        const hasUntestedRisk = impact.riskChips && impact.riskChips.some(r => r.kind === 'untested');
+        const hasCriticalRisk = impact.riskChips && impact.riskChips.some(r => r.kind === 'critical' || r.kind === 'conflict');
+        
+        if (totalImpact > 10 || hasCriticalRisk) {
+          riskRating = "CRITICAL RISK";
+          riskColor = "#f87171"; // rose red
+        } else if (totalImpact > 3 || hasUntestedRisk) {
+          riskRating = "MEDIUM RISK";
+          riskColor = "#fbbf24"; // amber
+        }
+
+        let dynamicSummary = "If you modify this code, ";
+        if (node.kind === 'Function' || node.kind === 'Method') {
+          if (incomingCalls.length > 0) {
+            const callers = incomingCalls.slice(0, 2).map(e => e.from.split(':').pop()).join(', ');
+            const others = incomingCalls.length - 2;
+            dynamicSummary += 'which is directly invoked by <strong>' + callers + '</strong>' + (others > 0 ? ' and ' + others + ' others' : '') + ', ';
+          }
+          dynamicSummary += 'it will directly impact <strong>' + neighbors.length + ' connections</strong>. ';
+        } else if (node.kind === 'Class') {
+          dynamicSummary += "which holds core object structure and definitions, ";
+        } else if (node.kind === 'Table') {
+          dynamicSummary += "which represents persistent database storage, ";
+        } else if (node.kind === 'API') {
+          dynamicSummary += "which serves as a public HTTP routing gateway, ";
+        }
+
+        if (totalImpact > 0) {
+          dynamicSummary += 'the changes will propagate downstream across the graph to affect a total of <strong>' + totalImpact + ' modules</strong>.';
+        } else {
+          dynamicSummary += "there is no downstream propagation risk as this node is isolated.";
+        }
+
+        html += '<div class="impact-prediction-card">';
+        html += '  <div class="prediction-title">';
+        html += '    <span>⚡</span> Impact Inference (<span style="color:' + riskColor + '">' + riskRating + '</span>)';
+        html += '  </div>';
+        html += '  <p class="prediction-text">' + dynamicSummary + '</p>';
+
+        if (downstreamAPIs.length > 0) {
+          const apiSample = downstreamAPIs.slice(0, 3).join(', ');
+          const others = downstreamAPIs.length - 3;
+          html += '  <div class="prediction-item">';
+          html += '    <span class="prediction-bullet">▪</span>';
+          html += '    <span>Propagates to external public HTTP endpoints: <strong>' + apiSample + '</strong>' + (others > 0 ? ' and ' + others + ' others' : '') + '.</span>';
+          html += '  </div>';
+        }
+
+        if (downstreamTables.length > 0) {
+          const tableSample = downstreamTables.slice(0, 3).join(', ');
+          const others = downstreamTables.length - 3;
+          html += '  <div class="prediction-item">';
+          html += '    <span class="prediction-bullet">▪</span>';
+          html += '    <span>Affects database table read/writes: <strong>' + tableSample + '</strong>' + (others > 0 ? ' and ' + others + ' others' : '') + '.</span>';
+          html += '  </div>';
+        }
+
+        if (hasUntestedRisk) {
+          html += '  <div class="prediction-item">';
+          html += '    <span class="prediction-bullet">▪</span>';
+          html += '    <span><strong>Warning:</strong> Pathways are untested, meaning changes here have a higher regression probability.</span>';
+          html += '  </div>';
+        }
+
+        html += '</div>';
 
         if (node.signature) {
           html += \`

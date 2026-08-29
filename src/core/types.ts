@@ -263,3 +263,77 @@ export function errorEnvelope(message: string): CanonicalEnvelope<{ error: strin
     evidence_used: false,
   };
 }
+
+// ─── Architecture Insights ─────────────────────────────────────────────────────
+
+export interface InsightItem {
+  id: string;
+  name: string;
+  kind: NodeKind;
+  score: number;
+  reason: string;
+  path?: string;
+}
+
+export interface CycleInsight {
+  nodes: string[];
+  edgeTypes: EdgeKind[];
+}
+
+export interface InsightsResult {
+  ok: boolean;
+  cycles: CycleInsight[];
+  highlyCoupled: InsightItem[];
+  bottlenecks: InsightItem[];
+  hubs: InsightItem[];
+  isolated: InsightItem[];
+  hotspots: InsightItem[];
+  largeDownstream: InsightItem[];
+}
+
+// ─── Graph projections (not a second graph) ────────────────────────────────────
+
+export type ViewMode = 'height' | 'depth' | 'call' | 'api' | 'db' | 'flow';
+
+export interface GraphView {
+  mode: ViewMode;
+  focusId?: string;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+// ─── Human explanation ─────────────────────────────────────────────────────────
+
+export interface Explanation {
+  title: string;
+  summary: string;
+  bullets: string[];
+  paths: string[];
+  risks: string[];
+  tests: string[];
+  nextSteps: string[];
+}
+
+// ─── Change plan ───────────────────────────────────────────────────────────────
+
+export interface ChangePlan {
+  target: GraphNode;
+  allowedFiles: string[];
+  impacted: string[];
+  policies: PolicyResult;
+  testsToRun: string[];
+  contracts: string[];
+  risks: RiskChip[];
+  requiredEvidence: string[];
+}
+
+// ─── Verification ──────────────────────────────────────────────────────────────
+
+export interface VerificationResult {
+  ok: boolean;
+  checks: Array<{
+    name: string;
+    passed: boolean;
+    message: string;
+  }>;
+}

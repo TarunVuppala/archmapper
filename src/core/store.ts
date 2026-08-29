@@ -112,6 +112,32 @@ export class GraphStore {
     return rows.map(r => this.rowToNode(r));
   }
 
+  listAllNodes(): GraphNode[] {
+    return this.listNodes(undefined, 100000);
+  }
+
+  listNodesByKinds(kinds: NodeKind[], limit = 5000): GraphNode[] {
+    if (kinds.length === 0) return [];
+    const placeholders = kinds.map(() => '?').join(',');
+    const stmt = this.db.prepare(
+      `SELECT * FROM nodes WHERE kind IN (${placeholders}) ORDER BY kind, name LIMIT ?`
+    );
+    const rows = stmt.all(...kinds, limit) as any[];
+    return rows.map(r => this.rowToNode(r));
+  }
+
+  /** Resolve a stable ID, exact name, or search query to a single node. */
+  resolveNode(idOrName: string): GraphNode | undefined {
+    const exact = this.getNode(idOrName);
+    if (exact) return exact;
+    const results = this.searchNodes(idOrName, 10);
+    if (results.length === 0) return undefined;
+    const nameMatch = results.find(n => n.name === idOrName);
+    if (nameMatch) return nameMatch;
+    const suffixMatch = results.find(n => n.id.endsWith(':' + idOrName) || n.id.endsWith('/' + idOrName));
+    return suffixMatch ?? results[0];
+  }
+
   searchNodes(query: string, limit = 50): GraphNode[] {
     const stmt = this.db.prepare(
       'SELECT * FROM nodes WHERE name LIKE ? OR path LIKE ? OR id LIKE ? ORDER BY name LIMIT ?'
@@ -372,6 +398,16 @@ export class GraphStore {
   }
 
   // ─── Lifecycle ─────────────────────────────────────────────────────────────
+
+  /** Full rebuild: drop existing graph rows, then upsert. */
+  replaceGraph(nodes: GraphNode[], edges: GraphEdge[]): void {
+    this.transaction(() => {
+      this.db.exec('DELETE FROM edges');
+      this.db.exec('DELETE FROM nodes');
+      for (const n of nodes) this.upsertNode(n);
+      for (const e of edges) this.upsertEdge(e);
+    });
+  }
 
   close(): void {
     this.db.close();

@@ -1,7 +1,6 @@
 // Symbol-level diff impact.
 // Compares symbols between two versions and computes union impact.
 
-import { execSync } from 'node:child_process';
 import type { SymbolDiff, DiffImpactResult, ChangeKind } from './types.js';
 import type { GraphStore } from './store.js';
 import { computeImpact } from './impact.js';
@@ -10,35 +9,6 @@ import { parseSingleFile } from '../parse/index.js';
 export interface DiffOptions {
   base?: string;
   head?: string;
-}
-
-// Read uncommitted, staged, and untracked files from git
-export function getGitChangedFiles(repoPath: string = '.'): string[] {
-  try {
-    const files = new Set<string>();
-
-    // 1. Unstaged modified files
-    try {
-      const stdout = execSync('git diff --name-only', { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] });
-      stdout.split('\n').map(f => f.trim()).filter(Boolean).forEach(f => files.add(f));
-    } catch { /* ignore git fail */ }
-
-    // 2. Staged modified files
-    try {
-      const stagedStdout = execSync('git diff --cached --name-only', { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] });
-      stagedStdout.split('\n').map(f => f.trim()).filter(Boolean).forEach(f => files.add(f));
-    } catch { /* ignore git fail */ }
-
-    // 3. Untracked workspace files
-    try {
-      const untrackedStdout = execSync('git ls-files --others --exclude-standard', { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] });
-      untrackedStdout.split('\n').map(f => f.trim()).filter(Boolean).forEach(f => files.add(f));
-    } catch { /* ignore git fail */ }
-
-    return Array.from(files);
-  } catch {
-    return [];
-  }
 }
 
 // Compare two sets of nodes to detect symbol changes
@@ -99,11 +69,11 @@ export function diffSymbols(
 // Compute impact of symbol-level diffs
 export function computeDiffImpact(
   store: GraphStore,
-  repoPath: string = '.',
+  base: string,
+  head: string,
   changedPaths?: string[]
 ): DiffImpactResult {
-  const paths = changedPaths && changedPaths.length > 0 ? changedPaths : getGitChangedFiles(repoPath);
-  const changedSymbols = diffSymbols(store, repoPath, paths);
+  const changedSymbols = diffSymbols(store, base, head, changedPaths);
 
   // Compute union impact of all changed symbols
   const startIds = changedSymbols.map(d => d.nodeId);

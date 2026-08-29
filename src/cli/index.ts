@@ -1,552 +1,496 @@
 #!/usr/bin/env node
-// archmap CLI — one command, many subcommands.
-// Every subcommand supports --json.
-
 import { Command } from 'commander';
 import { existsSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
 import { parseRepository } from '../parse/index.js';
 import {
-  GraphStore, computeImpact, computeDiffImpact, evaluatePolicies,
+  GraphStore, computeImpact, computeDiffImpact,
   RAGIndex, Journal, healthCheck, reconstructFlow,
-  envelope, errorEnvelope,
-  fileId, functionId,
+  envelope,
+  identifyFromGraph, loadSeed, explainImpact,
+  whyPathOp, insightsOp, viewOp, planChangeOp, mermaidFromView, docsOp,
 } from '../core/index.js';
-import type { GraphNode } from '../core/types.js';
+import type { GraphNode, NodeKind } from '../core/types.js';
+import { quickPick } from './picker.js';
 
 const program = new Command();
+program.name('archmap').description(
+  '🏗️  Architecture Mapper — find out what happens if you change your code.\n\n' +
+  'Quick start:\n' +
+  '  archmap init              Index your codebase\n' +
+  '  archmap summary           See what\'s in your code\n' +
+  '  archmap explain <thing>   What does this do?\n' +
+  '  archmap impact <thing>    What breaks if I change this?\n' +
+  '  archmap ui                Open the visualizer'
+).version('0.1.0');
 
-program
-  .name('archmap')
-  .description('Architecture Mapper — one knowledge graph for your codebase')
-  .version('0.1.0');
-
-// ─── Helpers ───────────────────────────────────────────────────────────────────
-
-function getArchmapDir(repoPath: string): string {
-  return join(repoPath, '.archmap');
+// ─── Helpers ───────────────────────────────────────────────────────
+const KIND_ICON: Record<string, string> = {
+  Function: '⚡', Method: '⚡', Class: '📦', Interface: '🔌',
+  Table: '🗄️', API: '🌐', File: '📄', External: '🔗', Test: '🧪',
+  Service: '🏛️', Package: '📦', Event: '📣', Module: '📁',
+};
+function getArchmapDir(p: string) { return join(p, '.archmap'); }
+function openStore(p: string) {
+  const db = join(getArchmapDir(p), 'index.db');
+  if (!existsSync(db)) { console.error('❌ No indexed data. Run: archmap init'); process.exit(1); }
+  return new GraphStore(db);
 }
-
-function openStore(repoPath: string): GraphStore {
-  const dbPath = join(getArchmapDir(repoPath), 'index.db');
-  return new GraphStore(dbPath);
+function findNode(store: GraphStore, q: string): GraphNode | null {
+  let n = store.getNode(q); if (n) return n;
+  const r = store.searchNodes(q, 5); return r.length ? r[0] : null;
 }
-
-function output(result: unknown, json: boolean = false): void {
-  if (json) {
-    console.log(JSON.stringify(result, null, 2));
-  } else {
-    if (result && typeof result === 'object' && 'ok' in result) {
-      const r = result as any;
-      if (!r.ok) {
-        console.error(`❌ Error: ${r.data?.error ?? 'Unknown error'}`);
-        process.exit(1);
-      }
+function prettyNode(n: GraphNode) {
+  const icon = KIND_ICON[n.kind] || '•';
+  const loc = n.path ? `${n.path}${n.startLine ? ':' + n.startLine : ''}` : '';
+  return `  ${icon} ${n.name}  ${n.kind}  ${loc}`;
+}
+function prettyImpact(result: any) {
+  const lines: string[] = [];
+  const counts = result.counts || {};
+  const total = Object.values(counts).reduce((a: number, b: any) => a + (b as number), 0);
+  lines.push(`\n📊 Impact: ${total} things affected\n`);
+  const order: NodeKind[] = ['Function', 'Method', 'Class', 'Interface', 'Table', 'API', 'External', 'Test'];
+  for (const k of order) if (counts[k]) lines.push(`   ${counts[k]}× ${k}`);
+  if (result.paths?.length) {
+    lines.push('\n🔗 Paths:\n');
+    for (const p of result.paths.slice(0, 5)) {
+      for (const s of p.steps) lines.push(`    ${(s.from.split(':').pop() || s.from)} ──${s.edgeType}──▸ ${(s.to.split(':').pop() || s.to)}`);
+      lines.push('');
     }
-    console.log(JSON.stringify(result, null, 2));
   }
+  if (result.riskChips?.length) {
+    lines.push('⚠️  Risks:\n');
+    const icons: Record<string, string> = { critical: '🔴', db_write: '💾', external: '🔗', untested: '🧪' };
+    for (const r of result.riskChips) lines.push(`   ${icons[r.kind] || '⚠️'} ${r.message}`);
+    lines.push('');
+  }
+  return lines.join('\n');
 }
+function output(result: unknown) { console.log(JSON.stringify(result, null, 2)); }
 
-// ─── init ──────────────────────────────────────────────────────────────────────
-
-program
-  .command('init [path]')
-  .description('Create .archmap/, index repo, write .gitignore + .mcp.json + starter seed.yaml')
-  .option('--daemon', 'Also start the HTTP daemon after init')
+// ─── init ──────────────────────────────────────────────────────────
+program.command('init [path]').description('Set up archmap for this project (run once)')
   .option('--json', 'Output as JSON')
-  .action((repoPath: string = '.', opts: { daemon?: boolean; json?: boolean }) => {
-    const absPath = resolve(repoPath);
-    const archmapDir = getArchmapDir(absPath);
-    const startTime = Date.now();
-
-    // Create .archmap/ directory
-    mkdirSync(archmapDir, { recursive: true });
-    mkdirSync(join(archmapDir, 'cache', 'docs'), { recursive: true });
-
-    console.log(`🔧 Initializing archmap in ${absPath}...`);
-
-    // Parse and index
-    const store = openStore(absPath);
-    const { nodes, edges } = parseRepository(absPath);
-
-    store.transaction(() => {
-      store.upsertNodes(nodes);
-      store.upsertEdges(edges);
-    });
-
-    console.log(`📊 Indexed ${store.nodeCount} nodes, ${store.edgeCount} edges`);
-
-    // Write .gitignore entries
-    const gitignorePath = join(absPath, '.gitignore');
-    const gitignoreEntries = [
-      '.archmap/index.db',
-      '.archmap/vectors/',
-      '.archmap/cache/',
-      '.archmap/daemon.json',
-      '.archmap/agent-runs/',
-    ];
-
-    let existingGitignore = '';
-    if (existsSync(gitignorePath)) {
-      existingGitignore = readFileSync(gitignorePath, 'utf-8');
-    }
-
-    const newEntries = gitignoreEntries.filter(e => !existingGitignore.includes(e));
-    if (newEntries.length > 0) {
-      const separator = existingGitignore.endsWith('\n') ? '' : '\n';
-      writeFileSync(gitignorePath, existingGitignore + separator + newEntries.join('\n') + '\n');
-      console.log(`📝 Updated .gitignore with ${newEntries.length} entries`);
-    }
-
-    // Write .mcp.json
-    const mcpPath = join(absPath, '.mcp.json');
-    if (!existsSync(mcpPath)) {
-      const mcpConfig = {
-        mcpServers: {
-          'architecture-mapper': {
-            command: 'npx',
-            args: ['-y', 'archmap', 'mcp'],
-            cwd: '${workspaceFolder}',
-          },
-        },
-      };
-      writeFileSync(mcpPath, JSON.stringify(mcpConfig, null, 2) + '\n');
-      console.log('📝 Created .mcp.json');
-    }
-
-    // Write starter seed.yaml
-    const seedPath = join(archmapDir, 'seed.yaml');
-    if (!existsSync(seedPath)) {
-      const seed = `# Architecture Mapper seed file
-# Use this to correct or supplement automatic inference.
-# After loading, seed entries are upserted into the ONE graph.
-
-project:
-  name: ${basename(absPath)}
-
-services: []
-
-externals: []
-
-pins: []
-
-ignore_paths:
-  - node_modules/
-  - dist/
-  - build/
-  - .git/
-  - vendor/
-  - __pycache__/
-
-critical: []
-
-ask_me_when: stuck
-`;
-      writeFileSync(seedPath, seed);
-      console.log('📝 Created .archmap/seed.yaml');
-    }
-
-    // Validate
-    const validation = store.validateGraph();
-    if (!validation.ok) {
-      console.log(`⚠️  Graph validation warnings: ${validation.errors.length}`);
-    }
-
-    // Journal
-    const journal = new Journal(archmapDir);
-    journal.append('init', {
-      path: absPath,
-      nodeCount: store.nodeCount,
-      edgeCount: store.edgeCount,
-      duration_ms: Date.now() - startTime,
-    });
-
-    const finalNodeCount = store.nodeCount;
-    const finalEdgeCount = store.edgeCount;
-    store.close();
-
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
-    console.log(`\n✅ archmap initialized in ${elapsed}s`);
-    console.log(`   ${finalNodeCount} nodes, ${finalEdgeCount} edges`);
-    console.log(`   Database: ${join(archmapDir, 'index.db')}`);
-
-    if (opts.daemon) {
-      console.log('🚀 Starting daemon...');
-      // TODO: Phase 4 - start serve
+  .action(async (repoPath: string = '.', opts: any) => {
+    const abs = resolve(repoPath); const dir = getArchmapDir(abs); const t0 = Date.now();
+    mkdirSync(dir, { recursive: true }); mkdirSync(join(dir, 'cache', 'docs'), { recursive: true });
+    console.log(`\n🏗️  Setting up archmap for: ${basename(abs)}\n`);
+    const store = new GraphStore(join(dir, 'index.db'));
+    const { nodes, edges } = parseRepository(abs);
+    store.replaceGraph(nodes, edges);
+    identifyFromGraph(store, abs);
+    loadSeed(store, abs);
+    const gitignorePath = join(abs, '.gitignore');
+    const entries = ['.archmap/index.db', '.archmap/vectors/', '.archmap/cache/', '.archmap/daemon.json', '.archmap/agent-runs/'];
+    let gi = ''; if (existsSync(gitignorePath)) gi = readFileSync(gitignorePath, 'utf-8');
+    const newE = entries.filter(e => !gi.includes(e));
+    if (newE.length) writeFileSync(gitignorePath, gi + (gi.endsWith('\n') ? '' : '\n') + newE.join('\n') + '\n');
+    const mcpPath = join(abs, '.mcp.json');
+    if (!existsSync(mcpPath)) writeFileSync(mcpPath, JSON.stringify({ mcpServers: { 'architecture-mapper': { command: 'npx', args: ['-y', 'archmap', 'mcp'], cwd: '${workspaceFolder}' } } }, null, 2) + '\n');
+    const seedPath = join(dir, 'seed.yaml');
+    if (!existsSync(seedPath)) writeFileSync(seedPath, `# archmap seed file\nproject:\n  name: ${basename(abs)}\nservices: []\nexternals: []\npins: []\nignore_paths: [node_modules/, dist/, build/, .git/]\ncritical: []\n`);
+    const nc = store.nodeCount, ec = store.edgeCount; store.close();
+    const j = new Journal(dir); j.append('init', { path: abs, nodeCount: nc, edgeCount: ec });
+    const s = ((Date.now() - t0) / 1000).toFixed(1);
+    if (opts.json) output(envelope({ nodeCount: nc, edgeCount: ec }));
+    else {
+      console.log(`✅ Done in ${s}s — ${nc} code pieces, ${ec} connections\n`);
+      console.log(`   Open the visualizer:  archmap ui`);
+      console.log(`   Or explore:  archmap summary | explain | impact | map\n`);
     }
   });
 
-// ─── sync ──────────────────────────────────────────────────────────────────────
-
-program
-  .command('sync [path]')
-  .description('Re-index on demand (also used by git hook)')
-  .option('--json', 'Output as JSON')
-  .action((repoPath: string = '.', opts: { json?: boolean }) => {
-    const absPath = resolve(repoPath);
-    const archmapDir = getArchmapDir(absPath);
-
-    if (!existsSync(join(archmapDir, 'index.db'))) {
-      output(errorEnvelope('No .archmap/index.db found. Run "archmap init" first.'), opts.json ?? false);
-      return;
-    }
-
-    console.log(`🔄 Syncing ${absPath}...`);
-    const startTime = Date.now();
-    const store = openStore(absPath);
-
-    // Re-parse
-    const { nodes, edges } = parseRepository(absPath);
-    store.transaction(() => {
-      store.upsertNodes(nodes);
-      store.upsertEdges(edges);
-    });
-
-    const journal = new Journal(archmapDir);
-    journal.append('sync', {
-      nodeCount: store.nodeCount,
-      edgeCount: store.edgeCount,
-      duration_ms: Date.now() - startTime,
-    });
-
-    store.close();
-    output(envelope({
-      nodeCount: store.nodeCount,
-      edgeCount: store.edgeCount,
-      duration_ms: Date.now() - startTime,
-    }), opts.json ?? false);
+// ─── summary ───────────────────────────────────────────────────────
+program.command('summary').description('See what\'s in your code').option('--json')
+  .action((opts: any) => {
+    const store = openStore('.'); const nodes = store.listNodes(undefined, 10000);
+    if (opts.json) { const c: Record<string, number> = {}; nodes.forEach(n => c[n.kind] = (c[n.kind] || 0) + 1); output(envelope({ nodeCount: nodes.length, edgeCount: store.countEdges(), counts: c })); store.close(); return; }
+    const c: Record<string, number> = {}; nodes.forEach(n => c[n.kind] = (c[n.kind] || 0) + 1);
+    console.log(`\n📊 Your codebase: ${nodes.length} pieces, ${store.countEdges()} connections\n`);
+    for (const [k, v] of Object.entries(c).sort((a, b) => b[1] - a[1])) if (k !== 'File') console.log(`   ${String(v).padStart(3)}  ${KIND_ICON[k] || '•'} ${k}`);
+    const top = nodes.filter(n => ['Function', 'Method', 'Class'].includes(n.kind)).map(n => ({ n, c: store.getNeighbors(n.id).length })).sort((a, b) => b.c - a.c).slice(0, 5);
+    if (top.length) { console.log('\n🔥 Most connected:\n'); for (const { n, c } of top) console.log(`   ${String(c).padStart(3)} links  ${n.name}  (${n.path || n.id})`); }
+    console.log(''); store.close();
   });
 
-// ─── impact ────────────────────────────────────────────────────────────────────
+// ─── explain ───────────────────────────────────────────────────────
+program.command('explain [thing]').alias('symbol').description('What does this code do? Who uses it?')
+  .option('--json').action(async (thing?: string, opts: any = {}) => {
+    const store = openStore('.');
+    if (!thing) { const p = await quickPick(store, 'What do you want to understand?'); if (!p) { store.close(); return; } thing = p.id; }
+    const node = findNode(store, thing!);
+    if (!node) { console.log(`\n❌ Couldn't find "${thing}"\n`); store.close(); return; }
+    if (opts.json) { const callers = store.getInEdges(node.id).filter(e => e.type === 'CALLS'); const callees = store.getOutEdges(node.id).filter(e => e.type === 'CALLS'); output(envelope({ node, who_calls_it: callers.map(e => ({ id: e.from, evidence: e.evidence[0] })), what_it_calls: callees.map(e => ({ id: e.to, evidence: e.evidence[0] })) })); store.close(); return; }
+    console.log(`\n${prettyNode(node)}\n`);
+    const callers = store.getInEdges(node.id).filter(e => e.type === 'CALLS');
+    const callees = store.getOutEdges(node.id).filter(e => e.type === 'CALLS');
+    if (callers.length) { console.log('   📥 Who calls this:'); for (const e of callers) { const c = store.getNode(e.from); console.log(`      ← ${c?.name || e.from}  (${e.evidence[0]?.file}:${e.evidence[0]?.line})`); } console.log(''); }
+    if (callees.length) { console.log('   📤 What it calls:'); for (const e of callees) { const c = store.getNode(e.to); console.log(`      → ${c?.name || e.to}  (${e.evidence[0]?.file}:${e.evidence[0]?.line})`); } console.log(''); }
+    if (!callers.length && !callees.length) console.log('   No connections found.\n');
+    store.close();
+  });
 
-program
-  .command('impact <id>')
-  .description('Bounded blast radius + why-paths')
-  .option('--downstream', 'Direction (default)', true)
-  .option('--upstream', 'Direction: upstream')
-  .option('--depth <n>', 'Max traversal depth', '5')
-  .option('--paths <n>', 'Max why-paths', '7')
-  .option('--json', 'Output as JSON')
-  .action((id: string, opts: any) => {
-    const repoPath = '.';
-    const store = openStore(repoPath);
-
-    let node = store.getNode(id);
-    if (!node) {
-      const results = store.searchNodes(id, 1);
-      if (results.length > 0) {
-        node = results[0];
+// ─── impact ────────────────────────────────────────────────────────
+program.command('impact [thing]').alias('what-happens').description('What breaks if I change this?')
+  .option('--upstream').option('--depth <n>', '5').option('--json')
+  .action(async (thing?: string, opts: any = {}) => {
+    const store = openStore('.');
+    if (!thing) { const p = await quickPick(store, 'Impact of what?'); if (!p) { store.close(); return; } thing = p.id; }
+    const node = findNode(store, thing!);
+    if (!node) { console.log(`\n❌ Couldn't find "${thing}"\n`); store.close(); return; }
+    const result = computeImpact(store, [node.id], { direction: opts.upstream ? 'upstream' : 'downstream', maxDepth: parseInt(opts.depth || '5', 10) });
+    if (opts.json) output(envelope(result));
+    else {
+      const explanation = explainImpact(store, result);
+      console.log(`\n🎯 ${explanation.title}\n`);
+      console.log(`   ${explanation.summary}\n`);
+      console.log(prettyImpact(result));
+      if (explanation.nextSteps.length) {
+        console.log('\n👉 Next:\n');
+        for (const s of explanation.nextSteps) console.log(`   • ${s}`);
+        console.log('');
       }
     }
-
-    if (!node) {
-      output(errorEnvelope(`Node not found: ${id}`), opts.json ?? false);
-      store.close();
-      return;
-    }
-
-    const direction = opts.upstream ? 'upstream' : 'downstream';
-    const result = computeImpact(store, [node.id], {
-      direction,
-      maxDepth: parseInt(opts.depth, 10),
-      maxPaths: parseInt(opts.paths, 10),
-    });
-
     store.close();
-    output(envelope(result), opts.json ?? false);
   });
 
-// ─── diff ──────────────────────────────────────────────────────────────────────
-
-program
-  .command('diff [base] [head]')
-  .description('Symbol-level diff impact')
-  .option('--json', 'Output as JSON')
-  .action((base: string = 'main', head: string = 'HEAD', opts: { json?: boolean }) => {
+// ─── where-used ────────────────────────────────────────────────────
+program.command('where-used [thing]').alias('who-uses').alias('neighbors').description('Who calls/uses this code?')
+  .option('--json').action(async (thing?: string, opts: any = {}) => {
     const store = openStore('.');
-    const result = computeDiffImpact(store, base, head);
+    if (!thing) { const p = await quickPick(store, 'Who uses what?'); if (!p) { store.close(); return; } thing = p.id; }
+    const node = findNode(store, thing!);
+    if (!node) { console.log(`\n❌ Couldn't find "${thing}"\n`); store.close(); return; }
+    const callers = store.getInEdges(node.id);
+    if (opts.json) output(envelope({ node, used_by: callers.map(e => ({ id: e.from, type: e.type, evidence: e.evidence[0] })) }));
+    else {
+      console.log(`\n📥 Who uses ${node.name}:\n`);
+      if (!callers.length) console.log('   Nobody — entry point or unused.\n');
+      else { for (const e of callers) { const c = store.getNode(e.from); console.log(`   ← ${c?.name || e.from}  (${e.type})`); } console.log(''); }
+    }
     store.close();
-    output(envelope(result), opts.json ?? false);
   });
 
-// ─── flow ──────────────────────────────────────────────────────────────────────
-
-program
-  .command('flow <id>')
-  .description('Reconstruct an evidence-backed flow')
-  .option('--json', 'Output as JSON')
-  .action((id: string, opts: { json?: boolean }) => {
+// ─── depends-on ────────────────────────────────────────────────────
+program.command('depends-on [thing]').alias('dependencies').description('What does this code depend on?')
+  .option('--json').action(async (thing?: string, opts: any = {}) => {
     const store = openStore('.');
-    let node = store.getNode(id);
-    if (!node) {
-      const results = store.searchNodes(id, 1);
-      if (results.length > 0) node = results[0];
+    if (!thing) { const p = await quickPick(store, 'Dependencies of what?'); if (!p) { store.close(); return; } thing = p.id; }
+    const node = findNode(store, thing!);
+    if (!node) { console.log(`\n❌ Couldn't find "${thing}"\n`); store.close(); return; }
+    const deps = store.getOutEdges(node.id);
+    if (opts.json) output(envelope({ node, depends_on: deps.map(e => ({ id: e.to, type: e.type, evidence: e.evidence[0] })) }));
+    else {
+      console.log(`\n📤 What ${node.name} depends on:\n`);
+      if (!deps.length) console.log('   Nothing — leaf node.\n');
+      else { for (const e of deps) { const t = store.getNode(e.to); console.log(`   → ${t?.name || e.to}  (${e.type})`); } console.log(''); }
     }
-    if (!node) {
-      output(errorEnvelope(`Node not found: ${id}`), opts.json ?? false);
-      store.close();
-      return;
+    store.close();
+  });
+
+// ─── trace ─────────────────────────────────────────────────────────
+program.command('trace [from] [to]').alias('why').alias('why_path').description('Show the path from A to B')
+  .option('--json').action(async (from?: string, to?: string, opts: any = {}) => {
+    const store = openStore('.');
+    if (!from) { const p = await quickPick(store, 'Trace FROM what?'); if (!p) { store.close(); return; } from = p.id; }
+    if (!to) { const p = await quickPick(store, 'Trace TO what?'); if (!p) { store.close(); return; } to = p.id; }
+    const fromN = findNode(store, from!); const toN = findNode(store, to!);
+    if (!fromN || !toN) { console.log(`\n❌ Couldn't find "${!fromN ? from : to}"\n`); store.close(); return; }
+    const env = whyPathOp(store, fromN.id, toN.id);
+    const paths = env.ok && 'paths' in env.data ? env.data.paths : [];
+    if (opts.json) output(envelope({ paths }));
+    else {
+      if (!paths.length) console.log(`\n🔍 No evidence-backed path found between ${fromN.name} and ${toN.name}\n`);
+      else { console.log(`\n🔗 ${fromN.name} → ${toN.name}:\n`); for (const p of paths) { for (const s of p.steps) console.log(`   ${(s.from.split(':').pop() || s.from)} ──${s.edgeType}──▸ ${(s.to.split(':').pop() || s.to)}`); console.log(''); } }
     }
+    store.close();
+  });
+
+// ─── tests ─────────────────────────────────────────────────────────
+program.command('tests [thing]').alias('tests_to_run').description('Which tests should I run?')
+  .option('--json').action(async (thing?: string, opts: any = {}) => {
+    const store = openStore('.');
+    if (!thing) { const p = await quickPick(store, 'Tests for what?'); if (!p) { store.close(); return; } thing = p.id; }
+    const node = findNode(store, thing!);
+    if (!node) { console.log(`\n❌ Couldn't find "${thing}"\n`); store.close(); return; }
+    const result = computeImpact(store, [node.id], { direction: 'downstream', maxDepth: 3 });
+    const tests = result.nodes.filter((n: any) => n.kind === 'Test');
+    if (opts.json) output(envelope({ tests: tests.map((t: any) => ({ id: t.id, name: t.name, path: t.path })), command: tests.length ? 'npm test' : null }));
+    else {
+      console.log(`\n🧪 Tests for ${node.name}:\n`);
+      if (!tests.length) console.log('   No tests found on impact path.\n');
+      else { for (const t of tests) console.log(`   • ${t.name}  (${t.path})`); console.log(''); }
+    }
+    store.close();
+  });
+
+// ─── flow ──────────────────────────────────────────────────────────
+program.command('flow [thing]').description('Trace execution flow from this point')
+  .option('--json').action(async (thing?: string, opts: any = {}) => {
+    const store = openStore('.');
+    if (!thing) { const p = await quickPick(store, 'Flow from where?'); if (!p) { store.close(); return; } thing = p.id; }
+    const node = findNode(store, thing!);
+    if (!node) { console.log(`\n❌ Couldn't find "${thing}"\n`); store.close(); return; }
     const result = reconstructFlow(store, node.id);
+    if (opts.json) output(envelope(result));
+    else {
+      console.log(`\n🌊 Flow from ${node.name}:\n`);
+      for (let i = 0; i < result.steps.length; i++) { const s = result.steps[i]; console.log(`   ${i === 0 ? '▶' : '↓'} ${s.label}`); if (s.evidence) console.log(`     📄 ${s.evidence.file}:${s.evidence.line}`); }
+      console.log('');
+    }
     store.close();
-    output(envelope(result), opts.json ?? false);
   });
 
-// ─── graph ─────────────────────────────────────────────────────────────────────
+// ─── search ────────────────────────────────────────────────────────
+program.command('search [query]').description('Find anything in the code')
+  .option('--limit <n>', '10').option('--json').action(async (query?: string, opts: any = {}) => {
+    const store = openStore('.');
+    if (!query) { const p = await quickPick(store, 'What are you looking for?'); if (!p) { store.close(); return; } if (opts.json) output(envelope(p)); else console.log(`\n  Found: ${prettyNode(p)}\n`); store.close(); return; }
+    const rag = new RAGIndex(); rag.indexNodes(store);
+    const results = rag.searchWithNodes(store, query, parseInt(opts.limit || '10'));
+    if (opts.json) output(envelope(results));
+    else { if (!results.length) console.log(`\n🔍 No results for "${query}"\n`); else { console.log(`\n🔍 ${results.length} results for "${query}":\n`); for (const r of results) console.log(prettyNode(r.node)); console.log(''); } }
+    store.close();
+  });
 
-program
-  .command('graph')
-  .description('Export a bounded graph view (json|mermaid)')
-  .option('--format <fmt>', 'Output format: json or mermaid', 'json')
-  .option('--max-nodes <n>', 'Max nodes to export', '200')
-  .option('--json', 'Output as JSON')
+// ─── map ───────────────────────────────────────────────────────────
+program.command('map').alias('graph').description('See the architecture')
+  .option('--format <f>', 'mermaid').option('--max-nodes <n>', '50').option('--json')
   .action((opts: any) => {
     const store = openStore('.');
-    const nodes = store.listNodes(undefined, parseInt(opts.maxNodes, 10));
+    const view = viewOp(store, 'height').data;
+    if (opts.format === 'json' || opts.json) { output(envelope(view)); store.close(); return; }
+    console.log('\n🗺️  Architecture map (overview — services, APIs, data, packages)\n');
+    console.log('```mermaid');
+    console.log(mermaidFromView(view));
+    console.log('```\n');
+    store.close();
+  });
 
-    if (opts.format === 'mermaid') {
-      console.log('graph LR');
-      for (const node of nodes) {
-        const edges = store.getOutEdges(node.id);
-        for (const edge of edges) {
-          if (nodes.some(n => n.id === edge.to)) {
-            const fromName = node.name.replace(/[^a-zA-Z0-9]/g, '_');
-            const toName = (store.getNode(edge.to)?.name ?? edge.to).replace(/[^a-zA-Z0-9]/g, '_');
-            console.log(`  ${fromName} -->|${edge.type}| ${toName}`);
-          }
-        }
+// ─── health ────────────────────────────────────────────────────────
+program.command('health').description('Graph health check').option('--json')
+  .action((opts: any) => {
+    const store = openStore('.'); const rows = healthCheck(store);
+    if (opts.json) output(envelope(rows));
+    else { console.log('\n🏥 Health:\n'); for (const r of rows) console.log(`   ${r.status === 'ok' ? '✅' : r.status === 'warn' ? '⚠️' : '❌'} ${r.message}`); console.log(''); }
+    store.close();
+  });
+
+// ─── pin ───────────────────────────────────────────────────────────
+program.command('pin').description('Connect two pieces of code')
+  .requiredOption('--from <id>').requiredOption('--to <id>').requiredOption('--type <edge>')
+  .option('--json').action((opts: any) => {
+    const store = openStore('.');
+    const edge = store.upsertEdgeByEndpoints(opts.type, opts.from, opts.to, [{ file: 'user', line: 0, snippet: 'user pin' }], ['user']);
+    new Journal(getArchmapDir('.')).append('pin', { from: opts.from, to: opts.to, type: opts.type });
+    if (opts.json) output(envelope(edge)); else console.log(`\n✅ Connected ${opts.from} → ${opts.to} (${opts.type})\n`);
+    store.close();
+  });
+
+// ─── sync ──────────────────────────────────────────────────────────
+program.command('analyze [path]').alias('sync').description('Analyze / re-scan a repository into the graph').option('--json')
+  .action((repoPath: string = '.', opts: any) => {
+    const abs = resolve(repoPath); const store = openStore(abs);
+    const { nodes, edges } = parseRepository(abs);
+    store.replaceGraph(nodes, edges);
+    identifyFromGraph(store, abs);
+    loadSeed(store, abs);
+    if (opts.json) output(envelope({ nodeCount: store.nodeCount, edgeCount: store.edgeCount }));
+    else console.log(`\n✅ Re-scanned: ${store.nodeCount} pieces, ${store.edgeCount} connections\n`);
+    store.close();
+  });
+
+// ─── mcp ───────────────────────────────────────────────────────────
+program.command('mcp').description('Start MCP server for AI tools').action(async () => {
+  const { startMCPServer } = await import('../mcp/server.js'); startMCPServer();
+});
+
+// ─── ui ────────────────────────────────────────────────────────────
+program.command('ui').description('Open the visualizer in your browser')
+  .option('--port <n>', '3743').option('--no-open')
+  .action(async (opts: any) => {
+    const port = parseInt(opts.port || '3743', 10);
+    if (opts.open !== false) setTimeout(() => {
+      const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
+      import('node:child_process').then(cp => cp.exec(`${cmd} http://localhost:${port}`));
+    }, 600);
+    const { startUIServer } = await import('../ui/server.js'); await startUIServer(port);
+  });
+
+// ─── serve ─────────────────────────────────────────────────────────
+program.command('serve').description('Start HTTP API server')
+  .option('--port <n>', '3742').action(async (opts: any) => {
+    const { startDaemon } = await import('../daemon/server.js'); await startDaemon(parseInt(opts.port || '3742', 10));
+  });
+
+// ─── guide ─────────────────────────────────────────────────────────
+program.command('guide').description('Interactive walkthrough for first-timers').action(() => {
+  console.log(`
+🏗️  Welcome to Architecture Mapper!
+
+This tool helps you understand your codebase.
+You don't need to know how to code to use it.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STEP 1: Set up
+   archmap init              Index your codebase
+
+STEP 2: Open visualizer
+   archmap ui                See everything in browser
+
+STEP 3: Explore (no args = interactive picker!)
+   archmap summary           See what's in your code
+   archmap explain           What does this do?
+   archmap where-used        Who uses this code?
+   archmap depends-on        What does it need?
+
+STEP 4: Understand risk
+   archmap insights          Cycles, coupling, hotspots
+   archmap impact            What breaks if I change this?
+   archmap tests             Which tests to run?
+   archmap trace A B         Why are these connected?
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+💡 Every command works without arguments —
+   it shows a numbered list to pick from!
+
+   Every command has --json for machine output.
+`);
+});
+
+// ─── insights ──────────────────────────────────────────────────────
+program.command('insights').description('Cycles, coupling, bottlenecks, hotspots')
+  .option('--json').action((opts: any) => {
+    const store = openStore('.');
+    const env = insightsOp(store);
+    if (opts.json) { output(env); store.close(); return; }
+    const d = env.data;
+    console.log('\n🔎 Architecture insights\n');
+    const block = (title: string, lines: string[]) => {
+      console.log(`   ${title}`);
+      if (!lines.length) console.log('      none found');
+      else for (const l of lines.slice(0, 8)) console.log(`      • ${l}`);
+      console.log('');
+    };
+    block('Circular dependencies', d.cycles.map(c => c.nodes.map(id => id.split(':').pop()).join(' → ')));
+    block('Highly coupled', d.highlyCoupled.map(i => `${i.name} — ${i.reason}`));
+    block('Bottlenecks', d.bottlenecks.map(i => `${i.name} — ${i.reason}`));
+    block('Hubs', d.hubs.map(i => `${i.name} — ${i.reason}`));
+    block('Isolated', d.isolated.map(i => `${i.name}`));
+    block('Hotspots', d.hotspots.map(i => `${i.name} — ${i.reason}`));
+    block('Large downstream impact', d.largeDownstream.map(i => `${i.name} — ${i.reason}`));
+    store.close();
+  });
+
+program.command('plan_change [thing]').description('Bounded files you are allowed to change')
+  .option('--json').action(async (thing?: string, opts: any = {}) => {
+    const store = openStore('.');
+    if (!thing) { const p = await quickPick(store, 'Plan a change to what?'); if (!p) { store.close(); return; } thing = p.id; }
+    const env = planChangeOp(store, thing!);
+    if (!env.ok || !('target' in env.data)) { console.log(`\n❌ Couldn't find "${thing}"\n`); store.close(); return; }
+    if (opts.json) output(env);
+    else {
+      const plan = env.data;
+      console.log(`\n📋 Change plan for ${plan.target.name}\n`);
+      console.log('   Allowed files:');
+      for (const f of plan.allowedFiles) console.log(`      • ${f}`);
+      console.log(`\n   Impacted: ${plan.impacted.length} nodes`);
+      if (plan.testsToRun.length) {
+        console.log('   Tests:');
+        for (const t of plan.testsToRun) console.log(`      • ${t.split(':').pop()}`);
       }
-    } else {
-      output(envelope({ nodes, edges: nodes.flatMap(n => store.getOutEdges(n.id)) }), opts.json ?? false);
+      console.log('');
     }
     store.close();
   });
 
-// ─── search ────────────────────────────────────────────────────────────────────
-
-program
-  .command('search <query>')
-  .description('RAG + graph search')
-  .option('--limit <n>', 'Max results', '20')
-  .option('--json', 'Output as JSON')
-  .action((query: string, opts: any) => {
+program.command('diff [base] [head]').description('Impact of a git diff')
+  .option('--json').action((base = 'main', head = 'HEAD', opts: any = {}) => {
     const store = openStore('.');
-    const rag = new RAGIndex();
-    rag.indexNodes(store);
-    const results = rag.searchWithNodes(store, query, parseInt(opts.limit, 10));
+    const result = computeDiffImpact(store, base, head, undefined, '.');
+    if (opts.json) output(envelope(result));
+    else {
+      console.log(`\n📑 Diff impact ${base}...${head}`);
+      if (result.changedSymbols.length) {
+        console.log(`   ${result.changedSymbols.length} changed symbols`);
+        for (const s of result.changedSymbols.slice(0, 12)) {
+          console.log(`      • ${s.change}  ${s.nodeId}`);
+        }
+      } else {
+        console.log('   No changed symbols resolved from git diff (graph still current).');
+      }
+      console.log(prettyImpact(result.impact));
+    }
     store.close();
-    output(envelope(results), opts.json ?? false);
   });
 
-// ─── symbol ────────────────────────────────────────────────────────────────────
-
-program
-  .command('symbol <id>')
-  .description('Node + neighbors summary')
-  .option('--json', 'Output as JSON')
-  .action((id: string, opts: { json?: boolean }) => {
+program.command('docs [name]').description('In-repo docs for a component or package')
+  .option('--json').action(async (name?: string, opts: any = {}) => {
     const store = openStore('.');
-    let node = store.getNode(id);
-    if (!node) {
-      const results = store.searchNodes(id, 1);
-      if (results.length > 0) node = results[0];
+    if (!name) { const p = await quickPick(store, 'Docs for what?'); if (!p) { store.close(); return; } name = p.name; }
+    const env = docsOp(store, name!);
+    if (opts.json) output(env);
+    else {
+      const d = env.data;
+      console.log(`\n📚 Docs related to ${name}\n`);
+      if (!d.docs.length) console.log('   No in-repo README/ADR/docs indexed. Add markdown and re-sync.\n');
+      else for (const doc of d.docs) console.log(`   • ${doc.name}  (${doc.path || doc.id})`);
+      console.log('');
     }
-    if (!node) {
-      output(errorEnvelope(`Node not found: ${id}`), opts.json ?? false);
-      store.close();
+    store.close();
+  });
+
+program.command('status [path]').description('Project/analysis status').option('--json')
+  .action((repoPath: string = '.', opts: any = {}) => {
+    const abs = resolve(repoPath);
+    const dir = getArchmapDir(abs);
+    const db = join(dir, 'index.db');
+    if (!existsSync(db)) {
+      if (opts.json) output(envelope({ initialized: false }));
+      else console.log('\n❌ Not initialized. Run: archmap init\n');
       return;
     }
-    const neighbors = store.getNeighbors(node.id);
-    output(envelope({ node, neighbors }), opts.json ?? false);
-    store.close();
-  });
-
-// ─── neighbors ─────────────────────────────────────────────────────────────────
-
-program
-  .command('neighbors <id>')
-  .description('Adjacent edges/nodes')
-  .option('--direction <dir>', 'out, in, or both', 'both')
-  .option('--json', 'Output as JSON')
-  .action((id: string, opts: any) => {
-    const store = openStore('.');
-    const edges = store.getNeighbors(id, opts.direction);
-    const nodes = edges.map(e => {
-      const otherId = e.from === id ? e.to : e.from;
-      return store.getNode(otherId);
-    }).filter(Boolean);
-    output(envelope({ edges, nodes }), opts.json ?? false);
-    store.close();
-  });
-
-// ─── why_path ──────────────────────────────────────────────────────────────────
-
-program
-  .command('why_path <from> <to>')
-  .description('Evidence-backed paths')
-  .option('--json', 'Output as JSON')
-  .action((from: string, to: string, opts: { json?: boolean }) => {
-    const store = openStore('.');
-    const result = computeImpact(store, [from], { direction: 'downstream', maxPaths: 7 });
-    const relevant = result.paths.filter(p =>
-      p.steps.some(s => s.to === to || s.from === to)
-    );
-    store.close();
-    output(envelope({ paths: relevant }), opts.json ?? false);
-  });
-
-// ─── tests_to_run ──────────────────────────────────────────────────────────────
-
-program
-  .command('tests_to_run <id>')
-  .description('Tests + inferred command')
-  .option('--json', 'Output as JSON')
-  .action((id: string, opts: { json?: boolean }) => {
-    const store = openStore('.');
-    const result = computeImpact(store, [id], { direction: 'downstream', maxDepth: 3 });
-    const testNodes = result.nodes.filter(n => n.kind === 'Test');
-    store.close();
-    output(envelope({
-      tests: testNodes.map(n => ({ id: n.id, name: n.name, path: n.path })),
-      inferredCommand: testNodes.length > 0 ? 'npm test' : null,
-    }), opts.json ?? false);
-  });
-
-// ─── docs ──────────────────────────────────────────────────────────────────────
-
-program
-  .command('docs <name>')
-  .description('Resolve official/in-repo docs')
-  .option('--json', 'Output as JSON')
-  .action((name: string, opts: { json?: boolean }) => {
-    const store = openStore('.');
-    const extNode = store.getNode(`ext:${name}`);
-    const docNodes = store.listNodes('Doc').filter(d => d.path?.includes(name));
-    store.close();
-    output(envelope({
-      external: extNode,
-      docs: docNodes,
-      note: 'Use "archmap sync" to re-index after fetching docs',
-    }), opts.json ?? false);
-  });
-
-// ─── pin ───────────────────────────────────────────────────────────────────────
-
-program
-  .command('pin')
-  .description('Add a user-confirmed edge')
-  .requiredOption('--from <id>', 'Source node ID')
-  .requiredOption('--to <id>', 'Target node ID')
-  .requiredOption('--type <edge>', 'Edge type')
-  .option('--json', 'Output as JSON')
-  .action((opts: any) => {
-    const store = openStore('.');
-    const edge = store.upsertEdgeByEndpoints(
-      opts.type, opts.from, opts.to,
-      [{ file: 'user', line: 0, snippet: 'user pin' }],
-      ['user']
-    );
-    const journal = new Journal(getArchmapDir('.'));
-    journal.append('pin', { from: opts.from, to: opts.to, type: opts.type });
-    store.close();
-    output(envelope(edge), opts.json ?? false);
-  });
-
-// ─── health ────────────────────────────────────────────────────────────────────
-
-program
-  .command('health')
-  .description('Graph consistency + inference health')
-  .option('--json', 'Output as JSON')
-  .action((opts: { json?: boolean }) => {
-    const store = openStore('.');
+    const store = new GraphStore(db);
     const rows = healthCheck(store);
+    const j = new Journal(dir).recent(5);
+    const payload = {
+      initialized: true,
+      path: abs,
+      nodes: store.nodeCount,
+      edges: store.edgeCount,
+      functions: store.countNodes('Function'),
+      apis: store.countNodes('API'),
+      tables: store.countNodes('Table'),
+      services: store.countNodes('Service'),
+      lastEvents: j.map(e => ({ event: e.event, at: e.timestamp })),
+    };
+    if (opts.json) output(envelope(payload));
+    else {
+      console.log(`\n📍 ${basename(abs)}`);
+      console.log(`   ${payload.nodes} components, ${payload.edges} relationships`);
+      console.log(`   ${payload.functions} functions · ${payload.apis} APIs · ${payload.tables} tables · ${payload.services} services`);
+      if (j.length) console.log(`   last: ${j[j.length - 1].event} @ ${j[j.length - 1].timestamp}`);
+      console.log('');
+    }
     store.close();
-    output(envelope(rows), opts.json ?? false);
   });
 
-// ─── plan_change ───────────────────────────────────────────────────────────────
-
-program
-  .command('plan_change <id>')
-  .description('Bounded mutation envelope')
-  .option('--json', 'Output as JSON')
-  .action((id: string, opts: { json?: boolean }) => {
+program.command('add [path]').description('Import another repository into the current graph (does not wipe)')
+  .option('--json').action((repoPath: string = '.', opts: any = {}) => {
+    const extra = resolve(repoPath);
+    if (!existsSync(extra)) { console.error('Path not found:', extra); process.exit(1); }
     const store = openStore('.');
-    let node = store.getNode(id);
-    if (!node) {
-      const results = store.searchNodes(id, 1);
-      if (results.length > 0) node = results[0];
-    }
-    if (!node) {
-      output(errorEnvelope(`Node not found: ${id}`), opts.json ?? false);
-      store.close();
-      return;
-    }
-
-    const impact = computeImpact(store, [node.id], { direction: 'downstream' });
-    const policies = evaluatePolicies(store);
-
-    output(envelope({
-      target: node,
-      allowedFiles: node.path ? [node.path] : [],
-      impacted: impact.nodes.map(n => n.id),
-      policies,
-      testsToRun: impact.testsToRun,
-    }), opts.json ?? false);
+    const { nodes, edges } = parseRepository(extra);
+    store.transaction(() => { store.upsertNodes(nodes); store.upsertEdges(edges); });
+    identifyFromGraph(store, extra);
+    const payload = { added: extra, nodes: store.nodeCount, edges: store.edgeCount };
+    new Journal(getArchmapDir('.')).append('add', payload);
+    if (opts.json) output(envelope(payload));
+    else console.log(`\n✅ Imported ${extra}\n   graph now: ${payload.nodes} nodes, ${payload.edges} edges\n`);
     store.close();
   });
-
-// ─── MCP ─────────────────────────────────────────────────────────────────────
-
-program
-  .command('mcp')
-  .description('MCP server over stdio')
-  .action(async () => {
-    const { startMCPServer } = await import('../mcp/server.js');
-    startMCPServer();
-  });
-
-// ─── UI ───────────────────────────────────────────────────────────────────────
-
-program
-  .command('ui')
-  .description('Serve the localhost visualizer')
-  .option('--port <n>', 'Port number', '3743')
-  .action(async (opts: any) => {
-    const { startUIServer } = await import('../ui/server.js');
-    await startUIServer(parseInt(opts.port, 10));
-  });
-
-// ─── serve ────────────────────────────────────────────────────────────────────
-
-program
-  .command('serve')
-  .description('Optional localhost HTTP daemon')
-  .option('--port <n>', 'Port number', '3742')
-  .action(async (opts: any) => {
-    const { startDaemon } = await import('../daemon/server.js');
-    await startDaemon(parseInt(opts.port, 10));
-  });
-
-// ─── orchestrate (stub) ────────────────────────────────────────────────────────
-
-program
-  .command('orchestrate <task>')
-  .description('Bounded, verified agent workflow')
-  .action((task: string) => {
-    console.log(`Agent orchestration — coming in Phase 5: ${task}`);
-  });
-
-// ─── route (stub) ──────────────────────────────────────────────────────────────
-
-program
-  .command('route <task>')
-  .description('Capability/cost model route')
-  .action((task: string) => {
-    console.log(`Cost routing — coming in Phase 5: ${task}`);
-  });
-
-// ─── Parse ─────────────────────────────────────────────────────────────────────
 
 program.parse();
