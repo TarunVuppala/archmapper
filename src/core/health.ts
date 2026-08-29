@@ -67,5 +67,28 @@ export function healthCheck(store: GraphStore): HealthRow[] {
     });
   }
 
+  const kinds: Array<import('./types.js').NodeKind> = [
+    'Service', 'Function', 'API', 'Table', 'Test', 'External', 'Class',
+  ];
+  for (const kind of kinds) {
+    const n = store.countNodes(kind);
+    if (n > 0) {
+      rows.push({
+        category: 'coverage',
+        status: 'ok',
+        message: `${kind}: ${n}`,
+      });
+    }
+  }
+
+  const calls = store.countEdges('CALLS');
+  if (calls === 0 && store.countNodes('Function') > 0) {
+    rows.push({
+      category: 'relationships',
+      status: 'warn',
+      message: 'Functions exist but no CALLS edges were extracted',
+    });
+  }
+
   return rows;
 }

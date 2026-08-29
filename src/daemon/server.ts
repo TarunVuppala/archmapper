@@ -7,11 +7,14 @@ import { join } from 'node:path';
 import { GraphStore } from '../core/store.js';
 import { computeImpact } from '../core/impact.js';
 import { computeDiffImpact } from '../core/diff.js';
-import { evaluatePolicies } from '../core/policy.js';
 import { RAGIndex } from '../core/rag.js';
 import { healthCheck } from '../core/health.js';
 import { reconstructFlow } from '../core/flow.js';
 import { envelope, errorEnvelope } from '../core/types.js';
+import { findWhyPaths } from '../core/why.js';
+import { computeInsights } from '../core/insights.js';
+import { planChange } from '../core/plan.js';
+import { projectView } from '../core/views.js';
 
 const DEFAULT_PORT = 3742;
 
@@ -83,11 +86,10 @@ const routes: Route[] = [
     method: 'POST',
     path: '/v1/why_path',
     handler: (body, store) => {
-      const result = computeImpact(store, [body.from], { direction: 'downstream', maxPaths: 7 });
-      const relevant = result.paths.filter(p =>
-        p.steps.some(s => s.to === body.to || s.from === body.to)
-      );
-      return envelope({ paths: relevant });
+      const a = store.resolveNode(body.from);
+      const b = store.resolveNode(body.to);
+      if (!a || !b) return errorEnvelope('Node not found');
+      return envelope({ paths: findWhyPaths(store, a.id, b.id) });
     },
   },
   {
@@ -126,22 +128,20 @@ const routes: Route[] = [
     method: 'POST',
     path: '/v1/plan_change',
     handler: (body, store) => {
-      let node = store.getNode(body.id);
-      if (!node) {
-        const results = store.searchNodes(body.id, 1);
-        if (results.length > 0) node = results[0];
-      }
+      const node = store.resolveNode(body.id);
       if (!node) return errorEnvelope(`Node not found: ${body.id}`);
-      const impact = computeImpact(store, [node.id], { direction: 'downstream' });
-      const policies = evaluatePolicies(store);
-      return envelope({
-        target: node,
-        allowedFiles: node.path ? [node.path] : [],
-        impacted: impact.nodes.map(n => n.id),
-        policies,
-        testsToRun: impact.testsToRun,
-      });
+      return envelope(planChange(store, node));
     },
+  },
+  {
+    method: 'POST',
+    path: '/v1/insights',
+    handler: (_body, store) => envelope(computeInsights(store)),
+  },
+  {
+    method: 'POST',
+    path: '/v1/view',
+    handler: (body, store) => envelope(projectView(store, body.mode ?? 'height', body.focus)),
   },
 ];
 

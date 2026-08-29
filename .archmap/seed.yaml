@@ -1,0 +1,8 @@
+# archmap seed file
+project:
+  name: archmapper
+services: []
+externals: []
+pins: []
+ignore_paths: [node_modules/, dist/, build/, .git/]
+critical: []

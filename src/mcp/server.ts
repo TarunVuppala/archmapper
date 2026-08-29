@@ -6,11 +6,13 @@ import { join } from 'node:path';
 import { GraphStore } from '../core/store.js';
 import { computeImpact } from '../core/impact.js';
 import { computeDiffImpact } from '../core/diff.js';
-import { evaluatePolicies } from '../core/policy.js';
 import { RAGIndex } from '../core/rag.js';
 import { healthCheck } from '../core/health.js';
 import { envelope, errorEnvelope } from '../core/types.js';
-import { edgeId } from '../core/ids.js';
+import { findWhyPaths } from '../core/why.js';
+import { computeInsights } from '../core/insights.js';
+import { planChange } from '../core/plan.js';
+import { resolveDocs } from '../core/docs.js';
 
 const SERVER_NAME = 'architecture-mapper';
 const SERVER_VERSION = '0.1.0';
@@ -132,6 +134,14 @@ const TOOLS = [
     },
   },
   {
+    name: 'insights',
+    description: 'Architecture insights: cycles, coupling, bottlenecks, hubs, isolated modules, hotspots',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {},
+    },
+  },
+  {
     name: 'plan_change',
     description: 'Get a bounded mutation envelope for a proposed change',
     inputSchema: {
@@ -242,17 +252,15 @@ function handleToolCall(name: string, args: any, store: GraphStore): any {
     }
 
     case 'why_path': {
-      const result = computeImpact(store, [args.from], { direction: 'downstream', maxPaths: 7 });
-      const relevant = result.paths.filter(p =>
-        p.steps.some(s => s.to === args.to || s.from === args.to)
-      );
-      return { content: [{ type: 'text', text: JSON.stringify(envelope({ paths: relevant })) }] };
+      const a = store.resolveNode(args.from);
+      const b = store.resolveNode(args.to);
+      if (!a || !b) return { content: [{ type: 'text', text: JSON.stringify(errorEnvelope('Node not found')) }] };
+      const paths = findWhyPaths(store, a.id, b.id);
+      return { content: [{ type: 'text', text: JSON.stringify(envelope({ paths })) }] };
     }
 
     case 'docs_for': {
-      const extNode = store.getNode(`ext:${args.id}`);
-      const docNodes = store.listNodes('Doc').filter(d => d.path?.includes(args.id));
-      return { content: [{ type: 'text', text: JSON.stringify(envelope({ external: extNode, docs: docNodes })) }] };
+      return { content: [{ type: 'text', text: JSON.stringify(envelope(resolveDocs(store, args.id))) }] };
     }
 
     case 'tests_to_run': {
@@ -279,21 +287,13 @@ function handleToolCall(name: string, args: any, store: GraphStore): any {
     }
 
     case 'plan_change': {
-      let node = store.getNode(args.id);
-      if (!node) {
-        const results = store.searchNodes(args.id, 1);
-        if (results.length > 0) node = results[0];
-      }
+      const node = store.resolveNode(args.id);
       if (!node) return { content: [{ type: 'text', text: JSON.stringify(errorEnvelope(`Node not found: ${args.id}`)) }] };
-      const impact = computeImpact(store, [node.id], { direction: 'downstream' });
-      const policies = evaluatePolicies(store);
-      return { content: [{ type: 'text', text: JSON.stringify(envelope({
-        target: node,
-        allowedFiles: node.path ? [node.path] : [],
-        impacted: impact.nodes.map(n => n.id),
-        policies,
-        testsToRun: impact.testsToRun,
-      })) }] };
+      return { content: [{ type: 'text', text: JSON.stringify(envelope(planChange(store, node))) }] };
+    }
+
+    case 'insights': {
+      return { content: [{ type: 'text', text: JSON.stringify(envelope(computeInsights(store))) }] };
     }
 
     default:

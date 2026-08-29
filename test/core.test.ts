@@ -14,6 +14,12 @@ import { healthCheck } from '../src/core/health.js';
 import { reconstructFlow } from '../src/core/flow.js';
 import { Journal } from '../src/core/journal.js';
 import { envelope, errorEnvelope } from '../src/core/types.js';
+import { findWhyPaths } from '../src/core/why.js';
+import { computeInsights } from '../src/core/insights.js';
+import { projectView } from '../src/core/views.js';
+import { explainImpact } from '../src/core/explain.js';
+import { planChange } from '../src/core/plan.js';
+import { resolveDocs } from '../src/core/docs.js';
 import type { GraphNode, GraphEdge } from '../src/core/types.js';
 import {
   fileId, functionId, classId, tableId, edgeId, apiId, externalId,
@@ -51,49 +57,46 @@ function buildConformanceGraph(): void {
 
   // Services
   const nodes: GraphNode[] = [
-    makeNode({ id: 'fn:payments/service.ts:processPayment', name: 'processPayment', path: 'payments/service.ts', kind: 'Function' }),
-    makeNode({ id: 'fn:payments/service.ts:validateTransaction', name: 'validateTransaction', path: 'payments/service.ts', kind: 'Function' }),
-    makeNode({ id: 'fn:payments/service.ts:refundPayment', name: 'refundPayment', path: 'payments/service.ts', kind: 'Function' }),
-    makeNode({ id: 'fn:orders/service.ts:createOrder', name: 'createOrder', path: 'orders/service.ts', kind: 'Function' }),
-    makeNode({ id: 'fn:orders/service.ts:getOrder', name: 'getOrder', path: 'orders/service.ts', kind: 'Function' }),
-    makeNode({ id: 'fn:routes.ts:handlePayment', name: 'handlePayment', path: 'routes.ts', kind: 'Function' }),
-    makeNode({ id: 'fn:routes.ts:handleRefund', name: 'handleRefund', path: 'routes.ts', kind: 'Function' }),
-    makeNode({ id: 'api:POST:/payments', name: 'POST /payments', kind: 'API', path: 'api.yaml' }),
-    makeNode({ id: 'api:POST:/payments/:id/refund', name: 'POST /payments/:id/refund', kind: 'API', path: 'api.yaml' }),
-    makeNode({ id: 'table:payments', name: 'payments', kind: 'Table', path: 'schema.sql' }),
+    makeNode({ id: 'fn:catalog/service.ts:createItem', name: 'createItem', path: 'catalog/service.ts', kind: 'Function' }),
+    makeNode({ id: 'fn:catalog/service.ts:validateItem', name: 'validateItem', path: 'catalog/service.ts', kind: 'Function' }),
+    makeNode({ id: 'fn:catalog/service.ts:archiveItem', name: 'archiveItem', path: 'catalog/service.ts', kind: 'Function' }),
+    makeNode({ id: 'fn:search/service.ts:indexItem', name: 'indexItem', path: 'search/service.ts', kind: 'Function' }),
+    makeNode({ id: 'fn:search/service.ts:getIndexed', name: 'getIndexed', path: 'search/service.ts', kind: 'Function' }),
+    makeNode({ id: 'fn:routes.ts:handleCreateItem', name: 'handleCreateItem', path: 'routes.ts', kind: 'Function' }),
+    makeNode({ id: 'fn:routes.ts:handleArchive', name: 'handleArchive', path: 'routes.ts', kind: 'Function' }),
+    makeNode({ id: 'api:POST:/items', name: 'POST /items', kind: 'API', path: 'api.yaml' }),
+    makeNode({ id: 'api:POST:/items/:id/archive', name: 'POST /items/:id/archive', kind: 'API', path: 'api.yaml' }),
+    makeNode({ id: 'table:items', name: 'items', kind: 'Table', path: 'schema.sql' }),
     makeNode({ id: 'table:orders', name: 'orders', kind: 'Table', path: 'schema.sql' }),
-    makeNode({ id: 'ext:@payments/sdk', name: '@payments/sdk', kind: 'External' }),
-    makeNode({ id: 'test:payments/service.test.ts:testProcessPayment', name: 'testProcessPayment', path: 'payments/service.test.ts', kind: 'Test' }),
-    makeNode({ id: 'cls:payments/service.ts:PaymentService', name: 'PaymentService', path: 'payments/service.ts', kind: 'Class' }),
-    makeNode({ id: 'file:payments/service.ts', name: 'service.ts', path: 'payments/service.ts', kind: 'File', lang: 'typescript' }),
+    makeNode({ id: 'ext:@notify/sdk', name: '@notify/sdk', kind: 'External' }),
+    makeNode({ id: 'test:catalog/service.test.ts:testCreateItem', name: 'testCreateItem', path: 'catalog/service.test.ts', kind: 'Test' }),
+    makeNode({ id: 'cls:catalog/service.ts:CatalogService', name: 'CatalogService', path: 'catalog/service.ts', kind: 'Class' }),
+    makeNode({ id: 'file:catalog/service.ts', name: 'service.ts', path: 'catalog/service.ts', kind: 'File', lang: 'typescript' }),
   ];
 
   store.upsertNodes(nodes);
 
   const edges: GraphEdge[] = [
-    // processPayment calls validateTransaction
-    makeEdge({ id: 'e_pp_vt', type: 'CALLS', from: 'fn:payments/service.ts:processPayment', to: 'fn:payments/service.ts:validateTransaction',
-      evidence: [{ file: 'payments/service.ts', line: 18, snippet: 'validateTransaction(tx)' }] }),
-    // processPayment writes payments table
-    makeEdge({ id: 'e_pp_wp', type: 'WRITES', from: 'fn:payments/service.ts:processPayment', to: 'table:payments',
-      evidence: [{ file: 'payments/service.ts', line: 25, snippet: 'INSERT INTO payments' }] }),
-    // processPayment calls external SDK
-    makeEdge({ id: 'e_pp_ext', type: 'CALLS', from: 'fn:payments/service.ts:processPayment', to: 'ext:@payments/sdk',
-      evidence: [{ file: 'payments/service.ts', line: 20, snippet: 'PaymentSDK.charge()' }] }),
-    // handlePayment calls processPayment
-    makeEdge({ id: 'e_hp_pp', type: 'CALLS', from: 'fn:routes.ts:handlePayment', to: 'fn:payments/service.ts:processPayment',
-      evidence: [{ file: 'routes.ts', line: 5, snippet: 'processPayment(req.body)' }] }),
-    // POST /payments exposed by handlePayment
-    makeEdge({ id: 'e_hp_api', type: 'EXPOSES', from: 'fn:routes.ts:handlePayment', to: 'api:POST:/payments',
-      evidence: [{ file: 'routes.ts', line: 3, snippet: "app.post('/payments'" }] }),
-    // createOrder calls processPayment
-    makeEdge({ id: 'e_co_pp', type: 'CALLS', from: 'fn:orders/service.ts:createOrder', to: 'fn:payments/service.ts:processPayment',
-      evidence: [{ file: 'orders/service.ts', line: 10, snippet: 'processPayment(order)' }] }),
-    // test covers processPayment
-    makeEdge({ id: 'e_test_pp', type: 'TESTS', from: 'test:payments/service.test.ts:testProcessPayment', to: 'fn:payments/service.ts:processPayment',
-      evidence: [{ file: 'payments/service.test.ts', line: 5, snippet: 'it(processPayment)' }] }),
+    // createItem calls validateItem
+    makeEdge({ id: 'e_pp_vt', type: 'CALLS', from: 'fn:catalog/service.ts:createItem', to: 'fn:catalog/service.ts:validateItem',
+      evidence: [{ file: 'catalog/service.ts', line: 18, snippet: 'validateItem(tx)' }] }),
+    makeEdge({ id: 'e_pp_wp', type: 'WRITES', from: 'fn:catalog/service.ts:createItem', to: 'table:items',
+      evidence: [{ file: 'catalog/service.ts', line: 25, snippet: 'INSERT INTO items' }] }),
+    makeEdge({ id: 'e_pp_ext', type: 'CALLS', from: 'fn:catalog/service.ts:createItem', to: 'ext:@notify/sdk',
+      evidence: [{ file: 'catalog/service.ts', line: 20, snippet: 'NotifySDK.send()' }] }),
+    // handleCreateItem calls createItem
+    makeEdge({ id: 'e_hp_pp', type: 'CALLS', from: 'fn:routes.ts:handleCreateItem', to: 'fn:catalog/service.ts:createItem',
+      evidence: [{ file: 'routes.ts', line: 5, snippet: 'createItem(req.body)' }] }),
+    makeEdge({ id: 'e_hp_api', type: 'EXPOSES', from: 'fn:routes.ts:handleCreateItem', to: 'api:POST:/items',
+      evidence: [{ file: 'routes.ts', line: 3, snippet: "app.post('/items'" }] }),
+    // indexItem calls createItem
+    makeEdge({ id: 'e_co_pp', type: 'CALLS', from: 'fn:search/service.ts:indexItem', to: 'fn:catalog/service.ts:createItem',
+      evidence: [{ file: 'search/service.ts', line: 10, snippet: 'createItem(order)' }] }),
+    // test covers createItem
+    makeEdge({ id: 'e_test_pp', type: 'TESTS', from: 'test:catalog/service.test.ts:testCreateItem', to: 'fn:catalog/service.ts:createItem',
+      evidence: [{ file: 'catalog/service.test.ts', line: 5, snippet: 'it(createItem)' }] }),
     // file contains function
-    makeEdge({ id: 'e_f_pp', type: 'CONTAINS', from: 'file:payments/service.ts', to: 'fn:payments/service.ts:processPayment',
+    makeEdge({ id: 'e_f_pp', type: 'CONTAINS', from: 'file:catalog/service.ts', to: 'fn:catalog/service.ts:createItem',
       evidence: [] }),
   ];
 
@@ -167,11 +170,11 @@ describe('GraphStore', () => {
   });
 
   it('searches nodes', () => {
-    store.upsertNode(makeNode({ id: 'fn:a', name: 'processPayment' }));
-    store.upsertNode(makeNode({ id: 'fn:b', name: 'validateTransaction' }));
+    store.upsertNode(makeNode({ id: 'fn:a', name: 'createItem' }));
+    store.upsertNode(makeNode({ id: 'fn:b', name: 'validateItem' }));
     const results = store.searchNodes('process');
     expect(results.length).toBeGreaterThanOrEqual(1);
-    expect(results[0].name).toBe('processPayment');
+    expect(results[0].name).toBe('createItem');
   });
 
   it('returns neighbors', () => {
@@ -218,22 +221,27 @@ describe('Impact Algorithm', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('computes downstream impact from processPayment', () => {
-    const result = computeImpact(store, ['fn:payments/service.ts:processPayment'], {
+  it('computes downstream impact from createItem', () => {
+    const result = computeImpact(store, ['fn:catalog/service.ts:createItem'], {
       direction: 'downstream',
       maxDepth: 5,
     });
 
     expect(result.ok).toBe(true);
-    expect(result.startIds).toEqual(['fn:payments/service.ts:processPayment']);
+    expect(result.startIds).toEqual(['fn:catalog/service.ts:createItem']);
     expect(result.direction).toBe('downstream');
-    // Should find at least: processPayment, validateTransaction, external, payments table
-    expect(result.nodes.length).toBeGreaterThanOrEqual(2);
+    const ids = result.nodes.map(n => n.id);
+    // Callers, writers, tests, APIs — not callees (those are upstream).
+    expect(ids).toContain('fn:catalog/service.ts:createItem');
+    expect(ids).toContain('table:items');
+    expect(ids).toContain('fn:routes.ts:handleCreateItem');
+    expect(ids).toContain('fn:search/service.ts:indexItem');
+    expect(ids).not.toContain('fn:catalog/service.ts:validateItem');
     expect(result.edges.length).toBeGreaterThanOrEqual(1);
   });
 
   it('computes upstream impact', () => {
-    const result = computeImpact(store, ['fn:payments/service.ts:processPayment'], {
+    const result = computeImpact(store, ['fn:catalog/service.ts:createItem'], {
       direction: 'upstream',
       maxDepth: 5,
     });
@@ -241,11 +249,11 @@ describe('Impact Algorithm', () => {
     expect(result.ok).toBe(true);
     // Upstream = what this node depends on (its callees/imports)
     const nodeIds = result.nodes.map(n => n.id);
-    expect(nodeIds).toContain('fn:payments/service.ts:validateTransaction');
+    expect(nodeIds).toContain('fn:catalog/service.ts:validateItem');
   });
 
   it('generates why-paths', () => {
-    const result = computeImpact(store, ['fn:payments/service.ts:processPayment'], {
+    const result = computeImpact(store, ['fn:catalog/service.ts:createItem'], {
       direction: 'downstream',
       maxPaths: 7,
     });
@@ -258,7 +266,7 @@ describe('Impact Algorithm', () => {
   });
 
   it('identifies risk chips', () => {
-    const result = computeImpact(store, ['fn:payments/service.ts:processPayment'], {
+    const result = computeImpact(store, ['fn:catalog/service.ts:createItem'], {
       direction: 'downstream',
     });
 
@@ -272,14 +280,14 @@ describe('Impact Algorithm', () => {
   });
 
   it('respects maxDepth', () => {
-    const result = computeImpact(store, ['fn:payments/service.ts:processPayment'], {
+    const result = computeImpact(store, ['fn:catalog/service.ts:createItem'], {
       direction: 'downstream',
       maxDepth: 0,
     });
 
     // With depth 0, should only return the start node
     expect(result.nodes.length).toBe(1);
-    expect(result.nodes[0].id).toBe('fn:payments/service.ts:processPayment');
+    expect(result.nodes[0].id).toBe('fn:catalog/service.ts:createItem');
   });
 
   it('returns empty for non-existent node', () => {
@@ -360,7 +368,7 @@ describe('RAG Search', () => {
     rag.indexNodes(store);
     expect(rag.chunkCount).toBeGreaterThan(0);
 
-    const results = rag.searchWithNodes(store, 'processPayment');
+    const results = rag.searchWithNodes(store, 'createItem');
     expect(results.length).toBeGreaterThan(0);
     expect(results[0].score).toBeGreaterThan(0);
   });
@@ -369,8 +377,8 @@ describe('RAG Search', () => {
     const rag = new RAGIndex();
     rag.indexNodes(store);
 
-    const results = rag.searchWithNodes(store, 'processPayment');
-    const exactMatch = results.find(r => r.node.name === 'processPayment');
+    const results = rag.searchWithNodes(store, 'createItem');
+    const exactMatch = results.find(r => r.node.name === 'createItem');
     expect(exactMatch).toBeDefined();
     expect(exactMatch!.score).toBeGreaterThanOrEqual(0.5);
   });
@@ -407,11 +415,11 @@ describe('Flow Reconstruction', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('reconstructs flow from handlePayment', () => {
-    const result = reconstructFlow(store, 'fn:routes.ts:handlePayment');
+  it('reconstructs flow from handleCreateItem', () => {
+    const result = reconstructFlow(store, 'fn:routes.ts:handleCreateItem');
     expect(result.ok).toBe(true);
     expect(result.steps.length).toBeGreaterThan(0);
-    expect(result.steps[0].nodeId).toBe('fn:routes.ts:handlePayment');
+    expect(result.steps[0].nodeId).toBe('fn:routes.ts:handleCreateItem');
   });
 });
 
@@ -449,3 +457,98 @@ describe('Canonical Envelope', () => {
     expect(result.data.error).toBe('something broke');
   });
 });
+
+describe('Why paths', () => {
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'archmap-test-'));
+    store = new GraphStore(join(tmpDir, 'test.db'));
+    buildConformanceGraph();
+  });
+  afterEach(() => {
+    store.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('finds an evidence-backed path from function to table', () => {
+    const paths = findWhyPaths(store, 'fn:catalog/service.ts:createItem', 'table:items');
+    expect(paths.length).toBeGreaterThan(0);
+    expect(paths[0].steps.some(s => s.edgeType === 'WRITES')).toBe(true);
+    expect(paths[0].evidence.length).toBeGreaterThan(0);
+  });
+});
+
+describe('Insights', () => {
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'archmap-test-'));
+    store = new GraphStore(join(tmpDir, 'test.db'));
+    buildConformanceGraph();
+  });
+  afterEach(() => {
+    store.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('reports hubs and downstream impact', () => {
+    const result = computeInsights(store);
+    expect(result.ok).toBe(true);
+    expect(result.hubs.length).toBeGreaterThan(0);
+    expect(result.largeDownstream.length).toBeGreaterThan(0);
+  });
+});
+
+describe('Views', () => {
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'archmap-test-'));
+    store = new GraphStore(join(tmpDir, 'test.db'));
+    buildConformanceGraph();
+  });
+  afterEach(() => {
+    store.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('height view prefers architecture nodes over files', () => {
+    const view = projectView(store, 'height');
+    expect(view.mode).toBe('height');
+    expect(view.nodes.some(n => n.kind === 'API' || n.kind === 'Table' || n.kind === 'External')).toBe(true);
+  });
+});
+
+describe('Explain and plan', () => {
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'archmap-test-'));
+    store = new GraphStore(join(tmpDir, 'test.db'));
+    buildConformanceGraph();
+  });
+  afterEach(() => {
+    store.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('explains impact in plain language', () => {
+    const impact = computeImpact(store, ['fn:catalog/service.ts:createItem']);
+    const text = explainImpact(store, impact);
+    expect(text.summary.length).toBeGreaterThan(10);
+    expect(text.title).toContain('createItem');
+  });
+
+  it('builds a change envelope', () => {
+    const node = store.getNode('fn:catalog/service.ts:createItem')!;
+    const plan = planChange(store, node);
+    expect(plan.allowedFiles).toContain('catalog/service.ts');
+    expect(plan.impacted.length).toBeGreaterThan(0);
+  });
+
+  it('resolves in-repo docs without inventing APIs', () => {
+    store.upsertNode(makeNode({
+      id: 'doc:README.md',
+      name: 'Payments platform',
+      kind: 'Doc',
+      path: 'README.md',
+    }));
+    const docs = resolveDocs(store, 'payments');
+    expect(docs.docs.some(d => d.id === 'doc:README.md')).toBe(true);
+  });
+});
+
+

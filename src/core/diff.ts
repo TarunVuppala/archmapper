@@ -1,16 +1,30 @@
 // Symbol-level diff impact.
 // Compares symbols between two versions and computes union impact.
 
-import type { SymbolDiff, DiffImpactResult, ChangeKind } from './types.js';
+import { execSync } from 'node:child_process';
+import type { SymbolDiff, DiffImpactResult } from './types.js';
 import type { GraphStore } from './store.js';
 import { computeImpact } from './impact.js';
 
 export interface DiffOptions {
   base?: string;
   head?: string;
+  repoPath?: string;
 }
 
-// Compare two sets of nodes to detect symbol changes
+export function gitChangedPaths(repoPath: string, base: string, head: string): string[] {
+  try {
+    const out = execSync(`git diff --name-only ${base}...${head}`, {
+      cwd: repoPath,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return out.split(/\r?\n/).map(s => s.trim()).filter(Boolean).map(p => p.replace(/\\/g, '/'));
+  } catch {
+    return [];
+  }
+}
+
 export function diffSymbols(
   store: GraphStore,
   _base: string,
@@ -70,9 +84,22 @@ export function computeDiffImpact(
   store: GraphStore,
   base: string,
   head: string,
-  changedPaths?: string[]
+  changedPaths?: string[],
+  repoPath = '.'
 ): DiffImpactResult {
-  const changedSymbols = diffSymbols(store, base, head, changedPaths);
+  const paths = changedPaths ?? gitChangedPaths(repoPath, base, head);
+  const changedSymbols = diffSymbols(store, base, head, paths.length ? paths : undefined);
+
+  if (changedSymbols.length === 0 && paths.length > 0) {
+    const fromGraph = store.listAllNodes().filter(n =>
+      n.path && paths.some(p => n.path === p || p.endsWith(n.path!))
+    );
+    for (const n of fromGraph) {
+      if (n.kind === 'Function' || n.kind === 'Method' || n.kind === 'Class' || n.kind === 'API' || n.kind === 'Table') {
+        changedSymbols.push({ nodeId: n.id, change: 'body_only' });
+      }
+    }
+  }
 
   // Compute union impact of all changed symbols
   const startIds = changedSymbols.map(d => d.nodeId);

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "architecture-mapper": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "archmap",
+        "mcp"
+      ],
+      "cwd": "${workspaceFolder}"
+    }
+  }
+}

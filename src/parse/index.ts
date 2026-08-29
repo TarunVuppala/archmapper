@@ -4,7 +4,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, extname } from 'node:path';
 import type { GraphNode, GraphEdge, NodeKind, EdgeKind, Evidence } from '../core/types.js';
-import { fileId, functionId, classId, interfaceId, tableId, edgeId, apiId } from '../core/ids.js';
+import { fileId, functionId, classId, interfaceId, tableId, edgeId, apiId, docId } from '../core/ids.js';
 
 export interface ParseResult {
   nodes: GraphNode[];
@@ -227,6 +227,44 @@ function findClosingBrace(lines: string[], startLine: number): number {
   return Math.min(startLine + 100, lines.length - 1); // fallback
 }
 
+/** True for lines inside template literals / block comments so we don't parse HTML-in-TS as code. */
+function maskEmbeddedLines(lines: string[]): boolean[] {
+  const skip = Array(lines.length).fill(false);
+  let inTemplate = false;
+  let inBlock = false;
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (inTemplate || inBlock) skip[i] = true;
+    let escape = false;
+    for (let c = 0; c < line.length; c++) {
+      const ch = line[c];
+      const next = line[c + 1] || '';
+      if (escape) { escape = false; continue; }
+      if (ch === '\\') { escape = true; continue; }
+      if (inBlock) {
+        if (ch === '*' && next === '/') { inBlock = false; c++; }
+        continue;
+      }
+      if (inSingle) { if (ch === "'") inSingle = false; continue; }
+      if (inDouble) { if (ch === '"') inDouble = false; continue; }
+      if (inTemplate) {
+        if (ch === '`') inTemplate = false;
+        continue;
+      }
+      if (ch === '/' && next === '/') break;
+      if (ch === '/' && next === '*') { inBlock = true; c++; continue; }
+      if (ch === "'") { inSingle = true; continue; }
+      if (ch === '"') { inDouble = true; continue; }
+      if (ch === '`') { inTemplate = true; skip[i] = true; continue; }
+    }
+    inSingle = false;
+    inDouble = false;
+  }
+  return skip;
+}
+
 // ─── Cross-File Import & Symbol Resolver Data Structures ────────────────────────
 
 interface ImportedSymbol {
@@ -266,6 +304,7 @@ interface FileMeta {
   instantiations: Map<string, string>;
   // Discovered local definitions structure for Pass 2 scan
   funcDefs: FuncDef[];
+  skip: boolean[];
 }
 
 // ─── Import Path Resolver ──────────────────────────────────────────────────────
@@ -321,6 +360,13 @@ export function parseRepository(repoPath: string): ParseResult {
     const ext = extname(filePath).toLowerCase();
     const lang = LANGUAGE_MAP[ext];
 
+    if (lang === 'markdown') {
+      let md = '';
+      try { md = readFileSync(filePath, 'utf-8'); } catch { continue; }
+      extractDoc(relPath, md, nodes, edges, now);
+      continue;
+    }
+
     if (!lang && ext !== '.dockerfile' && ext !== '') continue;
 
     let content: string;
@@ -354,10 +400,12 @@ export function parseRepository(repoPath: string): ParseResult {
       wildcardImports: [],
       instantiations: new Map(),
       funcDefs: [],
+      skip: maskEmbeddedLines(lines),
     };
 
     // Populate definitions & imports
     extractPass1(meta, relativeFiles, nodes, edges, now);
+    extractTests(meta, nodes, edges, now);
     fileMetas.push(meta);
   }
 
@@ -380,7 +428,8 @@ export function parseRepository(repoPath: string): ParseResult {
     extractPass2(meta, fileMetas, globalDefinitions, nodes, edges, now);
   }
 
-  return { nodes, edges };
+  extractManifests(repoPath, relativeFiles, files, nodes, edges, now);
+  return finalizeGraph(nodes, edges, now);
 }
 
 // ─── Pass 1 Extraction Logic ───────────────────────────────────────────────────
@@ -392,10 +441,11 @@ function extractPass1(
   edges: GraphEdge[],
   now: string
 ): void {
-  const { content, lines, relPath, fId, lang } = meta;
+  const { content, lines, relPath, fId, lang, skip } = meta;
 
   // Extract Imports (JS/TS, Python, Java)
   for (let i = 0; i < lines.length; i++) {
+    if (skip[i]) continue;
     const line = lines[i].trim();
 
     // JS/TS Imports
@@ -626,6 +676,7 @@ function extractPass1(
   // Extract Definitions based on Language
   if (lang === 'typescript' || lang === 'javascript') {
     for (let i = 0; i < lines.length; i++) {
+      if (skip[i]) continue;
       const line = lines[i];
 
       // Instantiations: const store = new GraphStore()
@@ -635,7 +686,7 @@ function extractPass1(
       }
 
       // Top-level functions
-      const fnMatch = line.match(/(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(([^)]*)\)/);
+      const fnMatch = line.match(/(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(/);
       if (fnMatch) {
         const name = fnMatch[1];
         const sig = fnMatch[0];
@@ -850,8 +901,15 @@ function extractPass2(
   const callPattern = /\b([A-Z]\w*)\.(\w+)\s*\(|\b([a-z]\w*)\.(\w+)\s*\(|\.(\w+)\s*\(|\b([a-zA-Z_]\w*)\s*\(/g;
 
   for (const func of funcDefs) {
-    for (let lineIdx = func.startLine; lineIdx <= func.endLine && lineIdx < lines.length; lineIdx++) {
+    for (let lineIdx = Math.max(0, func.startLine - 2); lineIdx <= func.endLine && lineIdx < lines.length; lineIdx++) {
+      if (meta.skip[lineIdx]) continue;
       const line = lines[lineIdx];
+
+      extractDataAndEvents(func, line, lineIdx, meta, nodes, edges, now);
+
+      if (lang === 'python') {
+        extractPythonRoute(line, lineIdx, func, meta, nodes, edges, now);
+      }
 
       // Pattern: EXPOSES edge from express routes app.post('/route', handler)
       if (lang === 'typescript' || lang === 'javascript') {
@@ -983,11 +1041,8 @@ function extractPass2(
           }
         }
 
-        // Ultimate Fallback: Local ID
-        if (!resolvedId) {
-          resolvedId = functionId(relPath, calledName);
-          confidence = 0.5;
-        }
+        // Do not invent a local symbol that was never defined.
+        if (!resolvedId) continue;
 
         const edge: GraphEdge = {
           id: edgeId(func.id, resolvedId, 'CALLS'),
@@ -998,6 +1053,25 @@ function extractPass2(
 
         if (!edges.some(e => e.id === edge.id)) {
           edges.push(edge);
+        }
+
+        if (isTestFile(relPath) && !resolvedId.startsWith('ext:')) {
+          const testNode = nodes.find(n =>
+            n.kind === 'Test' && n.path === relPath && (n.startLine ?? 0) <= lineIdx + 1
+          );
+          const testFrom = testNode?.id ?? `test:${relPath}:file`;
+          if (!testNode) {
+            ensureNode(nodes, {
+              id: testFrom, kind: 'Test', name: relPath.split('/').pop() || relPath,
+              path: relPath, lang, updated_at: now,
+            });
+          }
+          pushEdge(edges, {
+            id: edgeId(testFrom, resolvedId, 'TESTS'),
+            type: 'TESTS', from: testFrom, to: resolvedId,
+            evidence: [{ file: relPath, line: lineIdx + 1, snippet: line.trim().slice(0, 120) }],
+            sources: ['parser'], confidence: 0.85, conflict: false, updated_at: now,
+          });
         }
       }
     }
@@ -1128,12 +1202,34 @@ function extractConfig(
     if (routeMatch) {
       const method = routeMatch[1].toUpperCase();
       const path = routeMatch[2];
-      const id = `api:${method}:${path}`;
+      const id = apiId(method, path);
       nodes.push({
         id, kind: 'API', name: `${method} ${path}`, path: relPath,
         lang: relPath.endsWith('.yaml') || relPath.endsWith('.yml') ? 'yaml' : 'json',
         startLine: i + 1, updated_at: now,
       });
+    }
+
+    // OpenAPI-style path keys: "  /payments:" then a nested "    post:"
+    const openapiPath = lines[i].match(/^\s+(\/\S+):\s*$/);
+    if (openapiPath) {
+      const path = openapiPath[1].replace(/['"]/g, '');
+      for (let j = i + 1; j < Math.min(i + 8, lines.length); j++) {
+        const methodMatch = lines[j].match(/^\s+(get|post|put|patch|delete|options|head)\s*:/i);
+        if (!methodMatch) {
+          if (/^\s+\//.test(lines[j])) break;
+          continue;
+        }
+        const method = methodMatch[1].toUpperCase();
+        const id = apiId(method, path);
+        if (!nodes.some(n => n.id === id)) {
+          nodes.push({
+            id, kind: 'API', name: `${method} ${path}`, path: relPath,
+            lang: 'yaml', startLine: j + 1, updated_at: now,
+            tags: ['openapi'],
+          });
+        }
+      }
     }
   }
 }
@@ -1171,6 +1267,247 @@ function extractGeneric(
       });
     }
   }
+}
+
+// ─── Tests, data ops, manifests, finalize ─────────────────────────────────────
+
+function isTestFile(relPath: string): boolean {
+  return /\.(test|spec)\.[jt]sx?$/.test(relPath)
+    || /(?:^|\/)tests?\//.test(relPath)
+    || /(?:^|\/)test_/.test(relPath)
+    || /_test\.py$/.test(relPath)
+    || /Test\.java$/.test(relPath);
+}
+
+function extractTests(
+  meta: FileMeta,
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  now: string
+): void {
+  if (!isTestFile(meta.relPath)) return;
+  const { lines, relPath, fId, lang } = meta;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const js = line.match(/(?:it|test|describe)\s*\(\s*['"`]([^'"`]+)['"`]/);
+    const py = line.match(/^\s*(?:async\s+)?def\s+(test_\w+)\s*\(/);
+    const junit = line.match(/void\s+(test\w+)\s*\(/);
+    const name = js?.[1] ?? py?.[1] ?? junit?.[1];
+    if (!name) continue;
+    const id = `test:${relPath}:${name.replace(/\s+/g, '_')}`;
+    if (nodes.some(n => n.id === id)) continue;
+    nodes.push({
+      id, kind: 'Test', name, path: relPath, lang,
+      startLine: i + 1, updated_at: now,
+    });
+    edges.push({
+      id: edgeId(fId, id, 'CONTAINS'),
+      type: 'CONTAINS', from: fId, to: id,
+      evidence: [{ file: relPath, line: i + 1, snippet: line.trim().slice(0, 120) }],
+      sources: ['parser'], confidence: 1.0, conflict: false, updated_at: now,
+    });
+  }
+}
+
+function extractDataAndEvents(
+  func: FuncDef,
+  line: string,
+  lineIdx: number,
+  meta: FileMeta,
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  now: string
+): void {
+  const { relPath } = meta;
+  // Only treat quoted SQL / query APIs as evidence — never CSS `update` or HTML `from`.
+  const writes = line.match(/(['"`]).*?\b(?:INSERT\s+INTO\s+['"`]?(\w+)|UPDATE\s+['"`]?(\w+)\s+SET|DELETE\s+FROM\s+['"`]?(\w+))/i);
+  if (writes) {
+    const tableName = writes[2] || writes[3] || writes[4];
+    if (!tableName) {
+      // fall through
+    } else {
+    const tId = tableId(tableName);
+    ensureNode(nodes, {
+      id: tId, kind: 'Table', name: tableName, path: relPath,
+      startLine: lineIdx + 1, updated_at: now,
+    });
+    pushEdge(edges, {
+      id: edgeId(func.id, tId, 'WRITES'),
+      type: 'WRITES', from: func.id, to: tId,
+      evidence: [{ file: relPath, line: lineIdx + 1, snippet: line.trim().slice(0, 120) }],
+      sources: ['parser'], confidence: 0.9, conflict: false, updated_at: now,
+    });
+    }
+  }
+
+  const reads = line.match(/(['"`]).*?\bSELECT\b.+?\bFROM\s+['"`]?(\w+)/i);
+  if (reads && !writes) {
+    const tId = tableId(reads[2]);
+    ensureNode(nodes, {
+      id: tId, kind: 'Table', name: reads[2], path: relPath,
+      startLine: lineIdx + 1, updated_at: now,
+    });
+    pushEdge(edges, {
+      id: edgeId(func.id, tId, 'READS'),
+      type: 'READS', from: func.id, to: tId,
+      evidence: [{ file: relPath, line: lineIdx + 1, snippet: line.trim().slice(0, 120) }],
+      sources: ['parser'], confidence: 0.75, conflict: false, updated_at: now,
+    });
+  }
+
+  const prisma = line.match(/prisma\.(\w+)\.(create|update|delete|upsert|findMany|findUnique|findFirst)/);
+  if (prisma) {
+    const tId = tableId(prisma[1]);
+    const kind = /create|update|delete|upsert/.test(prisma[2]) ? 'WRITES' : 'READS';
+    ensureNode(nodes, {
+      id: tId, kind: 'Table', name: prisma[1], path: relPath, updated_at: now,
+    });
+    pushEdge(edges, {
+      id: edgeId(func.id, tId, kind as EdgeKind),
+      type: kind as EdgeKind, from: func.id, to: tId,
+      evidence: [{ file: relPath, line: lineIdx + 1, snippet: line.trim().slice(0, 120) }],
+      sources: ['parser'], confidence: 0.92, conflict: false, updated_at: now,
+    });
+  }
+
+  const evt = line.match(/\.(?:emit|publish|subscribe)\s*\(\s*['"`]([^'"`]+)['"`]/);
+  if (evt) {
+    const eId = `event:${evt[1]}`;
+    const type: EdgeKind = /subscribe/.test(line) ? 'SUBSCRIBES' : 'PUBLISHES';
+    ensureNode(nodes, {
+      id: eId, kind: 'Event', name: evt[1], path: relPath,
+      startLine: lineIdx + 1, updated_at: now,
+    });
+    pushEdge(edges, {
+      id: edgeId(func.id, eId, type),
+      type, from: func.id, to: eId,
+      evidence: [{ file: relPath, line: lineIdx + 1, snippet: line.trim().slice(0, 120) }],
+      sources: ['parser'], confidence: 0.85, conflict: false, updated_at: now,
+    });
+  }
+}
+
+function extractPythonRoute(
+  line: string,
+  lineIdx: number,
+  func: FuncDef,
+  meta: FileMeta,
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  now: string
+): void {
+  const deco = line.match(/@(?:app|router|blueprint)\.(get|post|put|patch|delete|route)\s*\(\s*['"]([^'"]+)['"]/i);
+  if (!deco) return;
+  const method = deco[1].toLowerCase() === 'route' ? 'GET' : deco[1].toUpperCase();
+  const path = deco[2];
+  const aId = apiId(method, path);
+  ensureNode(nodes, {
+    id: aId, kind: 'API', name: `${method} ${path}`, path: meta.relPath,
+    lang: 'python', startLine: lineIdx + 1, updated_at: now,
+  });
+  pushEdge(edges, {
+    id: edgeId(func.id, aId, 'EXPOSES'),
+    type: 'EXPOSES', from: func.id, to: aId,
+    evidence: [{ file: meta.relPath, line: lineIdx + 1, snippet: line.trim().slice(0, 120) }],
+    sources: ['parser'], confidence: 0.95, conflict: false, updated_at: now,
+  });
+}
+
+function extractDoc(
+  relPath: string,
+  content: string,
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  now: string
+): void {
+  const fId = fileId(relPath);
+  const dId = docId(relPath);
+  const title = (content.match(/^#\s+(.+)$/m)?.[1] ?? relPath.split('/').pop() ?? relPath).trim();
+  ensureNode(nodes, {
+    id: fId, kind: 'File', name: relPath.split('/').pop() || relPath,
+    path: relPath, lang: 'markdown', updated_at: now,
+  });
+  ensureNode(nodes, {
+    id: dId, kind: 'Doc', name: title, path: relPath, lang: 'markdown', updated_at: now,
+  });
+  pushEdge(edges, {
+    id: edgeId(fId, dId, 'DOCUMENTS'),
+    type: 'DOCUMENTS', from: fId, to: dId,
+    evidence: [{ file: relPath, line: 1, snippet: title.slice(0, 120) }],
+    sources: ['parser'], confidence: 1.0, conflict: false, updated_at: now,
+  });
+}
+
+function extractManifests(
+  repoPath: string,
+  relativeFiles: string[],
+  absFiles: string[],
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  now: string
+): void {
+  for (let i = 0; i < relativeFiles.length; i++) {
+    const rel = relativeFiles[i];
+    if (!rel.endsWith('package.json')) continue;
+    let json: any;
+    try {
+      json = JSON.parse(readFileSync(absFiles[i], 'utf-8'));
+    } catch {
+      continue;
+    }
+    const name = json.name ?? rel.replace(/\/package\.json$/, '');
+    const version = json.version ?? 'workspace';
+    const pId = `pkg:${name}@${version}`;
+    ensureNode(nodes, {
+      id: pId, kind: 'Package', name, path: rel, lang: 'json', updated_at: now,
+      metadata: { version },
+    });
+    const deps = { ...(json.dependencies ?? {}), ...(json.peerDependencies ?? {}) };
+    for (const [dep, ver] of Object.entries(deps)) {
+      const extId = `ext:${dep}`;
+      ensureNode(nodes, {
+        id: extId, kind: 'External', name: dep, updated_at: now,
+        metadata: { version: String(ver) },
+      });
+      pushEdge(edges, {
+        id: edgeId(pId, extId, 'DEPENDS_ON'),
+        type: 'DEPENDS_ON', from: pId, to: extId,
+        evidence: [{ file: rel, line: 1, snippet: `"${dep}": "${String(ver)}"` }],
+        sources: ['lockfile'], confidence: 1.0, conflict: false, updated_at: now,
+      });
+    }
+  }
+}
+
+function finalizeGraph(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  now: string
+): ParseResult {
+  const nodeIds = new Set(nodes.map(n => n.id));
+  for (const e of edges) {
+    for (const end of [e.from, e.to]) {
+      if (end.startsWith('ext:') && !nodeIds.has(end)) {
+        nodes.push({
+          id: end, kind: 'External', name: end.slice(4), updated_at: now,
+        });
+        nodeIds.add(end);
+      }
+    }
+  }
+  return {
+    nodes,
+    edges: edges.filter(e => nodeIds.has(e.from) && nodeIds.has(e.to)),
+  };
+}
+
+function ensureNode(nodes: GraphNode[], node: GraphNode): void {
+  if (!nodes.some(n => n.id === node.id)) nodes.push(node);
+}
+
+function pushEdge(edges: GraphEdge[], edge: GraphEdge): void {
+  if (!edges.some(e => e.id === edge.id)) edges.push(edge);
 }
 
 // ─── Filesystem Walker ─────────────────────────────────────────────────────────

@@ -1,1203 +1,855 @@
-// UI server — localhost visualizer over the ONE graph.
-// Serves an interactive architecture visualizer.
+// UI server — localhost visualizer with horizontal hierarchical layout.
+// Pure canvas, no CDN dependencies, guaranteed to work.
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { existsSync, writeFileSync, readFileSync } from 'node:fs';
-import { join, extname } from 'node:path';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { execSync } from 'node:child_process';
 import { GraphStore } from '../core/store.js';
 import { computeImpact } from '../core/impact.js';
 import { healthCheck } from '../core/health.js';
 import { envelope } from '../core/types.js';
+import { projectView } from '../core/views.js';
+import { computeInsights } from '../core/insights.js';
+import { explainImpact } from '../core/explain.js';
+import type { ViewMode } from '../core/types.js';
 
 const DEFAULT_PORT = 3743;
 
-function parseBody(req: IncomingMessage): Promise<any> {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', (chunk: Buffer) => { data += chunk.toString(); });
-    req.on('end', () => {
-      try { resolve(data ? JSON.parse(data) : {}); } catch { resolve({}); }
+function getGitDiff(): string[] {
+  try {
+    const out = execSync('git diff --name-only HEAD~1 2>/dev/null || git diff --name-only 2>/dev/null || git ls-files --others --exclude-standard 2>/dev/null', {
+      encoding: 'utf-8',
+      timeout: 5000,
     });
-    req.on('error', reject);
-  });
+    return out.trim().split('\n').filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 function getHTML(): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Architecture Mapper — Neon Codeflow Suite</title>
-  <!-- D3 Engine -->
-  <script src="https://d3js.org/d3.v7.min.js"></script>
-  <style>
-    :root {
-      --bg-deep: #050508;
-      --bg-panel: #0b0c13;
-      --bg-panel-hover: #151724;
-      --border-glow: #1e2235;
-      --border-active: #ffffff;
-      --text-main: #f1f3f9;
-      --text-muted: #7e849e;
-      --primary: #5ca0ff;
-      --accent-purple: #c084fc;
-      --accent-green: #34d399;
-      --accent-amber: #fbbf24;
-      --accent-coral: #f87171;
-    }
-
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: var(--bg-deep);
-      color: var(--text-main);
-      overflow: hidden;
-      user-select: none;
-    }
-
-    #app {
-      display: flex;
-      height: 100vh;
-      width: 100vw;
-    }
-
-    /* Left Sidebar */
-    #sidebar {
-      width: 360px;
-      background: var(--bg-panel);
-      border-right: 1px solid var(--border-glow);
-      padding: 24px;
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
-      z-index: 10;
-      box-shadow: 10px 0 30px rgba(0,0,0,0.8);
-    }
-
-    /* Main visualizer canvas */
-    #graph-container {
-      flex: 1;
-      position: relative;
-      background: radial-gradient(circle at center, #0e111d 0%, #030305 100%);
-    }
-
-    svg#visualizer {
-      width: 100%;
-      height: 100%;
-      display: block;
-    }
-
-    /* Right Detail Sidebar */
-    #detail-panel {
-      position: absolute;
-      right: 0;
-      top: 0;
-      bottom: 0;
-      width: 400px;
-      background: rgba(11, 12, 19, 0.96);
-      backdrop-filter: blur(20px);
-      border-left: 1px solid var(--border-glow);
-      padding: 28px;
-      overflow-y: auto;
-      transform: translateX(100%);
-      transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
-      z-index: 20;
-      box-shadow: -10px 0 30px rgba(0,0,0,0.8);
-    }
-    #detail-panel.open {
-      transform: translateX(0);
-    }
-
-    h1.brand {
-      font-size: 19px;
-      font-weight: 800;
-      letter-spacing: 0.5px;
-      color: #fff;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    h1.brand span {
-      background: linear-gradient(135deg, #60a5fa, #c084fc);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-    }
-
-    .stats {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-    }
-    .stat {
-      background: var(--bg-panel-hover);
-      border: 1px solid rgba(255, 255, 255, 0.02);
-      padding: 12px;
-      border-radius: 6px;
-      transition: transform 0.2s, border-color 0.2s;
-    }
-    .stat:hover {
-      transform: translateY(-2px);
-      border-color: #3b82f6;
-    }
-    .stat-value {
-      font-size: 22px;
-      font-weight: 800;
-      color: #fff;
-    }
-    .stat-label {
-      font-size: 11px;
-      color: var(--text-muted);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-
-    /* Inputs & Search */
-    .search-container {
-      position: relative;
-    }
-    .search {
-      width: 100%;
-      padding: 12px 16px;
-      background: var(--bg-panel-hover);
-      border: 1px solid var(--border-glow);
-      border-radius: 6px;
-      color: #fff;
-      font-size: 14px;
-      outline: none;
-      transition: border-color 0.2s, box-shadow 0.2s;
-    }
-    .search:focus {
-      border-color: var(--primary);
-      box-shadow: 0 0 12px rgba(96, 165, 250, 0.2);
-    }
-
-    /* Dynamic Tabs Bar */
-    .tab-bar {
-      display: flex;
-      flex-wrap: wrap;
-      background: rgba(255,255,255,0.01);
-      padding: 4px;
-      border-radius: 6px;
-      border: 1px solid rgba(255,255,255,0.03);
-      gap: 4px;
-    }
-    .tab {
-      flex: 1 1 auto;
-      padding: 6px 8px;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 10px;
-      font-weight: 600;
-      background: transparent;
-      border: none;
-      color: var(--text-muted);
-      text-transform: uppercase;
-      transition: all 0.2s;
-      text-align: center;
-    }
-    .tab.active {
-      background: var(--bg-panel-hover);
-      color: #fff;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.5);
-    }
-
-    /* List styling */
-    .node-list-container {
-      flex: 1;
-      overflow-y: auto;
-      margin-right: -10px;
-      padding-right: 10px;
-    }
-    .node-list { list-style: none; display: flex; flex-direction: column; gap: 6px; }
-    .node-item {
-      padding: 12px;
-      border-radius: 6px;
-      background: rgba(255, 255, 255, 0.01);
-      border: 1px solid rgba(255,255,255,0.01);
-      cursor: pointer;
-      transition: all 0.2s;
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-    }
-    .node-item:hover {
-      background: var(--bg-panel-hover);
-      border-color: #31354a;
-      transform: translateX(4px);
-    }
-    .node-item.selected {
-      background: rgba(96, 165, 250, 0.08);
-      border-color: var(--primary);
-    }
-
-    .node-header-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-    }
-    .node-name {
-      font-size: 13.5px;
-      font-weight: 600;
-      color: #fff;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .node-kind-badge {
-      font-size: 9px;
-      font-weight: 700;
-      padding: 3px 6px;
-      border-radius: 3px;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    .node-path-row {
-      font-size: 11px;
-      color: var(--text-muted);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    /* Semantic Neon Kinds Badges */
-    .badge-Function, .badge-Method { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.2); }
-    .badge-Class { background: rgba(192, 132, 252, 0.15); color: #c084fc; border: 1px solid rgba(192, 132, 252, 0.2); }
-    .badge-Interface { background: rgba(139, 92, 246, 0.15); color: #a78bfa; border: 1px solid rgba(139, 92, 246, 0.2); }
-    .badge-Table { background: rgba(251, 191, 36, 0.15); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.2); }
-    .badge-API { background: rgba(52, 211, 153, 0.15); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.2); }
-    .badge-File { background: rgba(71, 85, 105, 0.15); color: #94a3b8; border: 1px solid rgba(71, 85, 105, 0.2); }
-    .badge-External { background: rgba(248, 113, 113, 0.15); color: #f87171; border: 1px solid rgba(248, 113, 113, 0.2); }
-    .badge-Test { background: rgba(30, 150, 200, 0.15); color: #38bdf8; border: 1px solid rgba(30, 150, 200, 0.2); }
-
-    /* Semantic Colored Directed Links */
-    .link {
-      fill: none;
-      transition: stroke 0.3s, stroke-width 0.3s, stroke-opacity 0.3s;
-      cursor: pointer;
-    }
-    
-    /* Edge Semantic Colors */
-    .link.type-CONTAINS {
-      stroke: #1e202f;
-      stroke-width: 1px;
-      stroke-dasharray: 2 2;
-    }
-    .link.type-CALLS {
-      stroke: rgba(96, 165, 250, 0.25);
-      stroke-width: 1.5px;
-    }
-    .link.type-IMPORTS {
-      stroke: rgba(167, 139, 250, 0.35);
-      stroke-width: 1.2px;
-      stroke-dasharray: 4 2;
-    }
-    .link.type-EXPOSES {
-      stroke: rgba(52, 211, 153, 0.35);
-      stroke-width: 2px;
-      stroke-dasharray: 4 4;
-    }
-    .link.type-READS, .link.type-WRITES {
-      stroke: rgba(251, 191, 36, 0.3);
-      stroke-width: 1.8px;
-    }
-
-    /* Edge Highlights */
-    .link.type-CONTAINS.highlight { stroke: #4b5563; stroke-width: 1.2px; }
-    .link.type-CALLS.highlight { stroke: #60a5fa; stroke-width: 3px; stroke-opacity: 0.95; }
-    .link.type-IMPORTS.highlight { stroke: #c084fc; stroke-width: 2.2px; stroke-opacity: 0.95; }
-    .link.type-EXPOSES.highlight { stroke: #34d399; stroke-width: 3px; stroke-opacity: 0.95; }
-    .link.type-READS.highlight, .link.type-WRITES.highlight { stroke: #fbbf24; stroke-width: 2.5px; stroke-opacity: 0.95; }
-
-    .link.fade {
-      stroke-opacity: 0.02 !important;
-    }
-
-    /* Nodes layout and animations */
-    .node-g {
-      cursor: grab;
-      transition: opacity 0.3s;
-    }
-    .node-g:active {
-      cursor: grabbing;
-    }
-    .node-circle {
-      stroke-width: 1.5px;
-      transition: r 0.3s, stroke-width 0.3s, fill 0.3s, stroke 0.3s;
-    }
-    .node-circle.highlight {
-      stroke-width: 3.5px;
-    }
-    .node-g.fade {
-      opacity: 0.08;
-    }
-
-    .node-label {
-      font-size: 10px;
-      fill: var(--text-muted);
-      pointer-events: none;
-      font-weight: 500;
-      transition: fill 0.3s, font-size 0.3s, opacity 0.3s;
-    }
-    .node-label.active {
-      fill: #ffffff;
-      font-weight: 700;
-      font-size: 12px;
-      opacity: 1 !important;
-    }
-
-    /* Detail layout */
-    .close-detail {
-      background: transparent;
-      border: none;
-      color: var(--text-muted);
-      font-size: 20px;
-      cursor: pointer;
-      position: absolute;
-      top: 24px;
-      right: 24px;
-      transition: color 0.2s;
-    }
-    .close-detail:hover { color: #fff; }
-
-    .detail-section {
-      margin-top: 24px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-    .section-title {
-      font-size: 12px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.8px;
-      color: var(--text-muted);
-      border-bottom: 1px solid rgba(255,255,255,0.05);
-      padding-bottom: 6px;
-    }
-
-    .signature-box {
-      background: rgba(0,0,0,0.5);
-      border: 1px solid var(--border-glow);
-      border-radius: 6px;
-      padding: 12px;
-      font-family: monospace;
-      font-size: 12px;
-      color: #ffffff;
-      overflow-x: auto;
-      white-space: pre-wrap;
-      word-break: break-all;
-    }
-
-    /* Risk tags */
-    .risk-chip {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 4px 10px;
-      border-radius: 4px;
-      font-size: 11px;
-      font-weight: 600;
-      margin: 3px;
-    }
-    .risk-critical { background: rgba(248, 113, 113, 0.1); color: #f87171; border: 1px solid rgba(248, 113, 113, 0.2); }
-    .risk-untested { background: rgba(251, 191, 36, 0.1); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.2); }
-    .risk-db_write { background: rgba(52, 211, 153, 0.1); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.2); }
-    .risk-external { background: rgba(167, 139, 250, 0.1); color: #a78bfa; border: 1px solid rgba(167, 139, 250, 0.2); }
-
-    /* Flow step / why-path styling */
-    .why-path {
-      background: rgba(255,255,255,0.01);
-      border: 1px solid rgba(255,255,255,0.02);
-      border-radius: 6px;
-      padding: 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-    .why-step {
-      font-size: 12px;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .arrow { color: var(--primary); font-weight: bold; }
-
-    /* Detail simple items */
-    .neighbor-item {
-      padding: 8px 12px;
-      background: rgba(255,255,255,0.01);
-      border-radius: 4px;
-      border: 1px solid rgba(255,255,255,0.01);
-      font-size: 12px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-    .neighbor-item:hover {
-      background: var(--bg-panel-hover);
-      border-color: #31354a;
-      transform: translateX(4px);
-    }
-
-    /* Edge animated flows */
-    .pulse-dot {
-      filter: url(#glow-pulse);
-    }
-
-    /* Canvas press interactive wave ripple */
-    .press-ripple {
-      fill: none;
-      stroke-width: 2px;
-      stroke-opacity: 1;
-      pointer-events: none;
-    }
-
-    /* Scrollbar */
-    ::-webkit-scrollbar {
-      width: 4px;
-    }
-    ::-webkit-scrollbar-track {
-      background: transparent;
-    }
-    ::-webkit-scrollbar-thumb {
-      background: var(--border-glow);
-      border-radius: 10px;
-    }
-    ::-webkit-scrollbar-thumb:hover {
-      background: rgba(255, 255, 255, 0.08);
-    }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Archmap — Architecture Visualizer</title>
+<style>
+  :root {
+    --bg: #0a0b10;
+    --bg-panel: #0f1018;
+    --bg-card: #161825;
+    --border: #1e2035;
+    --border-active: #3b82f6;
+    --text: #e8eaf0;
+    --text-dim: #6b7194;
+    --accent: #3b82f6;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Inter', -apple-system, system-ui, sans-serif; background: var(--bg); color: var(--text); overflow: hidden; height: 100vh; }
+  
+  #app { display: flex; height: 100vh; }
+  
+  /* ── Left Sidebar ── */
+  #sidebar {
+    width: 320px; min-width: 320px; background: var(--bg-panel);
+    border-right: 1px solid var(--border); display: flex; flex-direction: column;
+    z-index: 10; padding: 0;
+  }
+  .sidebar-header { padding: 20px 20px 12px; border-bottom: 1px solid var(--border); }
+  .brand { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+  .brand span { background: linear-gradient(135deg, #60a5fa, #a78bfa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .tagline { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+  
+  .stats-row { display: flex; gap: 8px; padding: 12px 20px; border-bottom: 1px solid var(--border); }
+  .stat-box { flex: 1; background: var(--bg-card); border-radius: 6px; padding: 10px 12px; text-align: center; }
+  .stat-num { font-size: 20px; font-weight: 800; }
+  .stat-lbl { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+  
+  .search-wrap { padding: 12px 20px; border-bottom: 1px solid var(--border); }
+  .search-input {
+    width: 100%; padding: 10px 14px; background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 6px; color: #fff; font-size: 13px; outline: none; transition: border-color 0.2s;
+  }
+  .search-input:focus { border-color: var(--accent); }
+  .search-input::placeholder { color: var(--text-dim); }
+  
+  .filter-bar { display: flex; flex-wrap: wrap; gap: 4px; padding: 8px 20px; border-bottom: 1px solid var(--border); }
+  .filter-btn {
+    padding: 5px 10px; border-radius: 4px; font-size: 10px; font-weight: 600;
+    background: transparent; border: 1px solid transparent; color: var(--text-dim);
+    cursor: pointer; text-transform: uppercase; transition: all 0.15s;
+  }
+  .filter-btn:hover { color: #fff; border-color: var(--border); }
+  .filter-btn.active { background: var(--bg-card); color: #fff; border-color: var(--accent); }
+  
+  .node-list-wrap { flex: 1; overflow-y: auto; padding: 8px 12px; }
+  .node-list { list-style: none; display: flex; flex-direction: column; gap: 4px; }
+  .node-item {
+    padding: 10px 12px; border-radius: 6px; background: transparent; cursor: pointer;
+    border: 1px solid transparent; transition: all 0.15s; display: flex; align-items: center; gap: 10px;
+  }
+  .node-item:hover { background: var(--bg-card); border-color: var(--border); transform: translateX(3px); }
+  .node-item.selected { background: rgba(59, 130, 246, 0.1); border-color: var(--accent); }
+  .node-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .node-text { flex: 1; min-width: 0; }
+  .node-nm { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .node-pth { font-size: 10px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+  .node-badge {
+    font-size: 9px; font-weight: 700; padding: 2px 5px; border-radius: 3px;
+    text-transform: uppercase; letter-spacing: 0.3px; flex-shrink: 0;
+  }
+  
+  /* ── Diff Panel ── */
+  .diff-section { border-bottom: 1px solid var(--border); padding: 12px 20px; }
+  .diff-title { font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--text-dim); margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+  .diff-title .dot { width: 6px; height: 6px; border-radius: 50%; background: #f59e0b; }
+  .diff-file {
+    padding: 6px 10px; margin-bottom: 3px; border-radius: 4px; font-size: 12px;
+    background: rgba(245, 158, 11, 0.05); border: 1px solid rgba(245, 158, 11, 0.1);
+    cursor: pointer; transition: all 0.15s; font-family: 'SF Mono', monospace;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .diff-file:hover { background: rgba(245, 158, 11, 0.12); border-color: rgba(245, 158, 11, 0.3); }
+  .diff-count { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+  
+  /* ── Canvas ── */
+  #canvas-wrap { flex: 1; position: relative; overflow: hidden; background: var(--bg); }
+  canvas#graph { display: block; width: 100%; height: 100%; }
+  
+  .zoom-badge {
+    position: absolute; bottom: 12px; right: 12px; background: var(--bg-panel);
+    border: 1px solid var(--border); border-radius: 4px; padding: 4px 10px;
+    font-size: 11px; color: var(--text-dim); pointer-events: none;
+  }
+  
+  /* ── Detail Panel (right slide) ── */
+  #detail {
+    position: absolute; right: 0; top: 0; bottom: 0; width: 420px;
+    background: rgba(15, 16, 24, 0.97); backdrop-filter: blur(16px);
+    border-left: 1px solid var(--border); padding: 24px; overflow-y: auto;
+    transform: translateX(100%); transition: transform 0.3s ease; z-index: 20;
+  }
+  #detail.open { transform: translateX(0); }
+  .detail-close {
+    position: absolute; top: 16px; right: 16px; background: none; border: none;
+    color: var(--text-dim); font-size: 18px; cursor: pointer;
+  }
+  .detail-close:hover { color: #fff; }
+  .detail-title { font-size: 18px; font-weight: 800; margin-bottom: 4px; word-break: break-all; }
+  .detail-sub { font-size: 11px; color: var(--text-dim); font-family: monospace; word-break: break-all; margin-bottom: 12px; }
+  .detail-badge { display: inline-block; font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 3px; text-transform: uppercase; margin-bottom: 10px; }
+  .detail-section { margin-top: 16px; }
+  .detail-section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--text-dim); border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-bottom: 8px; }
+  .detail-path { font-size: 12px; padding: 8px; background: var(--bg-card); border-radius: 4px; font-family: monospace; margin-bottom: 12px; }
+  .detail-sig { font-size: 12px; padding: 10px; background: rgba(0,0,0,0.4); border: 1px solid var(--border); border-radius: 4px; font-family: 'SF Mono', monospace; white-space: pre-wrap; word-break: break-all; margin-bottom: 12px; }
+  
+  .risk-tag {
+    display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px;
+    border-radius: 4px; font-size: 11px; font-weight: 600; margin: 3px 3px 3px 0;
+  }
+  .risk-downstream { background: rgba(59, 130, 246, 0.1); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.2); }
+  .risk-db_write { background: rgba(251, 191, 36, 0.1); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.2); }
+  .risk-external { background: rgba(167, 139, 250, 0.1); color: #a78bfa; border: 1px solid rgba(167, 139, 250, 0.2); }
+  .risk-untested { background: rgba(248, 113, 113, 0.1); color: #f87171; border: 1px solid rgba(248, 113, 113, 0.2); }
+  .risk-critical { background: rgba(248, 113, 113, 0.15); color: #f87171; border: 1px solid rgba(248, 113, 113, 0.3); }
+  
+  .path-flow { background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; padding: 10px; margin-bottom: 8px; }
+  .path-step { font-size: 12px; display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+  .path-arrow { color: var(--accent); font-weight: bold; }
+  
+  .conn-item {
+    display: flex; align-items: center; justify-content: space-between; padding: 8px 10px;
+    border-radius: 4px; background: var(--bg-card); border: 1px solid var(--border);
+    margin-bottom: 4px; cursor: pointer; transition: all 0.15s; font-size: 12px;
+  }
+  .conn-item:hover { border-color: var(--accent); transform: translateX(3px); }
+  
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
+</style>
 </head>
 <body>
-  <div id="app">
-    <!-- Left Panel -->
-    <div id="sidebar">
-      <h1 class="brand">⬡ <span>Archmap</span></h1>
-      
-      <div class="stats" id="stats">
-        <div class="stat">
-          <div class="stat-value" id="stat-nodes">0</div>
-          <div class="stat-label">Nodes</div>
-        </div>
-        <div class="stat">
-          <div class="stat-value" id="stat-edges">0</div>
-          <div class="stat-label">Edges</div>
-        </div>
-      </div>
-
-      <div class="search-container">
-        <input class="search" id="search" placeholder="Search codebase symbols..." />
-      </div>
-
-      <div class="tab-bar">
-        <!-- Dynamically generated based on present kinds -->
-      </div>
-
-      <div class="node-list-container">
-        <ul class="node-list" id="nodeList"></ul>
-      </div>
+<div id="app">
+  <!-- Left Sidebar -->
+  <div id="sidebar">
+    <div class="sidebar-header">
+      <div class="brand">⬡ <span>Archmap</span></div>
+      <div class="tagline">If you change this, what breaks? And why?</div>
     </div>
-
-    <!-- Center Visualization Screen -->
-    <div id="graph-container">
-      <svg id="visualizer">
-        <!-- Filters Definitions -->
-        <defs>
-          <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="4" result="blur" />
-            <feMerge>
-              <feMergeNode in="blur" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-          <filter id="glow-pulse" x="-100%" y="-100%" width="300%" height="300%">
-            <feGaussianBlur stdDeviation="3" result="blur" />
-            <feMerge>
-              <feMergeNode in="blur" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-          
-          <!-- Semantic Directional Markers -->
-          <marker id="arrow-CONTAINS" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#1e202f" />
-          </marker>
-          <marker id="arrow-CONTAINS-highlight" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#4b5563" />
-          </marker>
-
-          <marker id="arrow-CALLS" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#3b82f6" fill-opacity="0.5" />
-          </marker>
-          <marker id="arrow-CALLS-highlight" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#60a5fa" />
-          </marker>
-
-          <marker id="arrow-IMPORTS" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#8b5cf6" fill-opacity="0.5" />
-          </marker>
-          <marker id="arrow-IMPORTS-highlight" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#c084fc" />
-          </marker>
-
-          <marker id="arrow-EXPOSES" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#10b981" fill-opacity="0.5" />
-          </marker>
-          <marker id="arrow-EXPOSES-highlight" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#34d399" />
-          </marker>
-
-          <marker id="arrow-READS" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#f59e0b" fill-opacity="0.5" />
-          </marker>
-          <marker id="arrow-READS-highlight" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#fbbf24" />
-          </marker>
-
-          <marker id="arrow-WRITES" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#f59e0b" fill-opacity="0.5" />
-          </marker>
-          <marker id="arrow-WRITES-highlight" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#fbbf24" />
-          </marker>
-        </defs>
-        
-        <!-- Zoom/Pan Group Container -->
-        <g id="main-group">
-          <g id="links-layer"></g>
-          <g id="pulses-layer"></g>
-          <g id="nodes-layer"></g>
-        </g>
-      </svg>
+    
+    <div class="stats-row">
+      <div class="stat-box"><div class="stat-num" id="s-nodes">0</div><div class="stat-lbl">Nodes</div></div>
+      <div class="stat-box"><div class="stat-num" id="s-edges">0</div><div class="stat-lbl">Edges</div></div>
     </div>
-
-    <!-- Right Slide Detail Sidebar -->
-    <div id="detail-panel">
-      <button class="close-detail" id="closeDetail">✕</button>
-      <div id="detailContent"></div>
+    
+    <div class="search-wrap">
+      <input class="search-input" id="search" placeholder="Search symbols..." />
+    </div>
+    
+    <div class="filter-bar" id="filters"></div>
+    
+    <div class="diff-section" id="diff-section" style="display:none">
+      <div class="diff-title"><span class="dot"></span>Changed Files</div>
+      <div id="diff-list"></div>
+      <div class="diff-count" id="diff-count"></div>
+    </div>
+    
+    <div class="node-list-wrap">
+      <ul class="node-list" id="nodelist"></ul>
     </div>
   </div>
+  
+  <!-- Canvas -->
+  <div id="canvas-wrap">
+    <canvas id="graph"></canvas>
+    <div class="zoom-badge" id="zoom-badge">100%</div>
+    
+    <!-- Detail panel -->
+    <div id="detail">
+      <button class="detail-close" id="detail-close">✕</button>
+      <div id="detail-content"></div>
+    </div>
+  </div>
+</div>
 
-  <script>
-    // Colorful semantic configuration details
-    const kindColors = {
-      Function: '#60a5fa',   // Blue
-      Method: '#3b82f6',     // Indigo Blue
-      Class: '#c084fc',      // Amethyst Purple
-      Interface: '#a78bfa',  // Violet Lavender
-      Table: '#fbbf24',      // Amber Yellow
-      API: '#34d399',        // Emerald Green
-      File: '#94a3b8',       // Slate Gray
-      External: '#f87171',   // Warm Coral Red
-      Test: '#38bdf8',       // Sky Blue
-      Module: '#818cf8',     // Pastel Purple
-      Repo: '#ffffff'
-    };
+<script>
+// ── Color palette ──
+const KIND_COLORS = {
+  Function: '#60a5fa', Method: '#3b82f6', Class: '#c084fc', Interface: '#a78bfa',
+  Table: '#fbbf24', API: '#34d399', Route: '#10b981', File: '#64748b',
+  External: '#f87171', Test: '#38bdf8', Module: '#818cf8', Package: '#fb923c',
+  Service: '#f472b6', Repo: '#e2e8f0', Event: '#f59e0b', Job: '#ef4444',
+  Doc: '#94a3b8', Contract: '#2dd4bf', Infra: '#a855f7', Column: '#facc15',
+  ConfigKey: '#84cc16'
+};
+const EDGE_COLORS = {
+  CONTAINS: 'rgba(100,116,139,0.15)', CALLS: 'rgba(96,165,250,0.35)',
+  IMPORTS: 'rgba(167,139,250,0.3)', IMPLEMENTS: 'rgba(167,139,250,0.3)',
+  EXPOSES: 'rgba(52,211,153,0.4)', CONSUMES: 'rgba(244,114,182,0.35)',
+  READS: 'rgba(251,191,36,0.3)', WRITES: 'rgba(248,113,113,0.35)',
+  PUBLISHES: 'rgba(245,158,11,0.3)', SUBSCRIBES: 'rgba(245,158,11,0.25)',
+  TESTS: 'rgba(56,189,248,0.25)', DEPENDS_ON: 'rgba(148,163,184,0.25)',
+  DOCUMENTS: 'rgba(148,163,184,0.15)', CONSTRAINED_BY: 'rgba(148,163,184,0.15)',
+  CO_CHANGED: 'rgba(248,113,113,0.2)', BROKE_BEFORE: 'rgba(248,113,113,0.15)',
+  USES_CONFIG: 'rgba(132,204,22,0.2)'
+};
+const EDGE_HIGHLIGHT = {
+  CONTAINS: '#475569', CALLS: '#60a5fa', IMPORTS: '#c084fc', IMPLEMENTS: '#c084fc',
+  EXPOSES: '#34d399', CONSUMES: '#f472b6', READS: '#fbbf24', WRITES: '#f87171',
+  PUBLISHES: '#f59e0b', SUBSCRIBES: '#f59e0b', TESTS: '#38bdf8',
+  DEPENDS_ON: '#94a3b8', DOCUMENTS: '#94a3b8', CONSTRAINED_BY: '#94a3b8',
+  CO_CHANGED: '#f87171', BROKE_BEFORE: '#f87171', USES_CONFIG: '#84cc16'
+};
 
-    // Edge type Colors
-    const edgeColors = {
-      CONTAINS: '#1e202f',
-      CALLS: '#60a5fa',
-      IMPORTS: '#c084fc',
-      EXPOSES: '#34d399',
-      READS: '#fbbf24',
-      WRITES: '#fbbf24'
-    };
+let allNodes = [], allEdges = [], validEdges = [];
+let nodeMap = new Map();
+let selected = null, hovered = null;
+let activeFilter = 'all';
+let diffFiles = [];
 
-    let allNodes = [];
-    let allEdges = [];
-    let selectedNode = null;
-    let hoveredNode = null;
-    let currentView = 'all';
+// Layout data: { x, y, width, height } per node
+let layout = new Map();
 
-    // D3 Elements
-    const svg = d3.select("svg#visualizer");
-    const mainGroup = svg.select("g#main-group");
-    const linksLayer = mainGroup.select("g#links-layer");
-    const pulsesLayer = mainGroup.select("g#pulses-layer");
-    const nodesLayer = mainGroup.select("g#nodes-layer");
+// Canvas state
+const canvas = document.getElementById('graph');
+const ctx = canvas.getContext('2d');
+let camX = 0, camY = 0, camZoom = 1;
+let dragging = false, dragStartX = 0, dragStartY = 0, camStartX = 0, camStartY = 0;
+let animFrame = null;
 
-    let simulation, zoomBehavior;
+// ── Canvas setup ──
+function resizeCanvas() {
+  const wrap = document.getElementById('canvas-wrap');
+  canvas.width = wrap.clientWidth * devicePixelRatio;
+  canvas.height = wrap.clientHeight * devicePixelRatio;
+  canvas.style.width = wrap.clientWidth + 'px';
+  canvas.style.height = wrap.clientHeight + 'px';
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+}
+window.addEventListener('resize', () => { resizeCanvas(); render(); });
+resizeCanvas();
 
-    // Initialize application
-    async function init() {
-      try {
-        // 1. Fetch graph data
-        const data = await d3.json('/api/graph');
-        allNodes = data.nodes;
-        allEdges = data.edges;
-
-        // Update counters
-        document.getElementById('stat-nodes').textContent = allNodes.length;
-        document.getElementById('stat-edges').textContent = allEdges.length;
-
-        // 2. Generate categories tabs dynamically based ONLY on kinds present in the repo
-        buildDynamicTabs();
-
-        // Jitter & coordinate safety: ensure nodes have valid x and y coords initially
-        allNodes.forEach((n, i) => {
-          if (n.x === undefined || isNaN(n.x)) {
-            const angle = i * 0.2;
-            const r = 50 + i * 4;
-            n.x = r * Math.cos(angle);
-            n.y = r * Math.sin(angle);
-          }
-        });
-
-        // Map from/to properties to source/target for D3 forceLink compliance
-        allEdges.forEach(e => {
-          e.source = e.from;
-          e.target = e.to;
-        });
-
-        // Filter out dangling edges referencing missing node IDs to avoid D3 simulation crashes
-        const nodeIds = new Set(allNodes.map(n => n.id));
-        const validEdges = allEdges.filter(e => {
-          const fromId = typeof e.from === 'object' ? e.from.id : e.from;
-          const toId = typeof e.to === 'object' ? e.to.id : e.to;
-          return nodeIds.has(fromId) && nodeIds.has(toId);
-        });
-
-        // 3. Set up swipe panning / zooming using D3 zoom
-        zoomBehavior = d3.zoom()
-          .scaleExtent([0.1, 8])
-          .on("zoom", (event) => {
-            mainGroup.attr("transform", event.transform);
-          });
-
-        svg.call(zoomBehavior);
-
-        // Center camera baseline safely
-        const svgNode = svg.node();
-        const width = svgNode ? svgNode.clientWidth || svgNode.getBoundingClientRect().width : window.innerWidth - 360;
-        const height = svgNode ? svgNode.clientHeight || svgNode.getBoundingClientRect().height : window.innerHeight;
-        svg.call(zoomBehavior.transform, d3.zoomIdentity.translate(width / 2, height / 2).scale(0.8));
-
-        // 4. Set up Force Physics Simulation
-        simulation = d3.forceSimulation(allNodes)
-          .force("link", d3.forceLink(validEdges).id(d => d.id).distance(d => d.type === 'CONTAINS' ? 60 : 130).strength(0.6))
-          .force("charge", d3.forceManyBody().strength(-220).distanceMax(600))
-          .force("center", d3.forceCenter(0, 0))
-          .force("collision", d3.forceCollide().radius(d => getRadius(d) + 20))
-          .on("tick", ticked);
-
-        // 5. Register Event Listeners
-        initEvents();
-
-        // 6. Initial Render
-        renderNodeList();
-        updateGraphVisuals(validEdges);
-      } catch (err) {
-        console.error("Architecture Mapper UI Initialization failed:", err);
-        const list = document.getElementById('nodeList');
-        if (list) {
-          list.innerHTML = '<li style="padding: 12px; color: #ff5ca0; font-size:12px;">Crash: ' + err.message + '</li>';
-        }
+// ── Layered Layout (horizontal tree) ──
+function computeLayout(nodes, edges) {
+  const map = new Map(nodes.map(n => [n.id, n]));
+  const inDeg = new Map();
+  const adj = new Map();
+  
+  for (const n of nodes) { inDeg.set(n.id, 0); adj.set(n.id, []); }
+  for (const e of edges) {
+    if (!map.has(e.from) || !map.has(e.to)) continue;
+    if (e.from === e.to) continue;
+    inDeg.set(e.to, (inDeg.get(e.to) || 0) + 1);
+    adj.get(e.from).push(e.to);
+  }
+  
+  // Assign layers via BFS from roots
+  const layers = new Map();
+  const queue = [];
+  for (const n of nodes) {
+    if ((inDeg.get(n.id) || 0) === 0) { layers.set(n.id, 0); queue.push(n.id); }
+  }
+  // If no roots (cycle), pick node with lowest in-degree
+  if (queue.length === 0) {
+    const sorted = [...inDeg.entries()].sort((a, b) => a[1] - b[1]);
+    if (sorted.length > 0) { layers.set(sorted[0][0], 0); queue.push(sorted[0][0]); }
+  }
+  
+  let maxLayer = 0;
+  const visited = new Set(queue);
+  while (queue.length > 0) {
+    const id = queue.shift();
+    const L = layers.get(id);
+    for (const child of (adj.get(id) || [])) {
+      if (visited.has(child)) {
+        // Already assigned; check if we can push it further
+        const cur = layers.get(child) || 0;
+        if (cur <= L) { layers.set(child, L + 1); }
+        continue;
       }
+      visited.add(child);
+      layers.set(child, L + 1);
+      maxLayer = Math.max(maxLayer, L + 1);
+      queue.push(child);
     }
-
-    function getRadius(d) {
-      if (d.kind === 'File') return 8;
-      if (d.kind === 'API' || d.kind === 'Table') return 15;
-      if (d.kind === 'Class') return 13;
-      return 10; // functions & others
+  }
+  
+  // Assign remaining unvisited nodes
+  for (const n of nodes) {
+    if (!layers.has(n.id)) {
+      layers.set(n.id, maxLayer + 1);
+      maxLayer++;
     }
+  }
+  
+  // Group by layer
+  const byLayer = new Map();
+  for (const n of nodes) {
+    const L = layers.get(n.id) || 0;
+    if (!byLayer.has(L)) byLayer.set(L, []);
+    byLayer.get(L).push(n);
+  }
+  
+  // Position: horizontal spacing = 280px per layer, vertical spacing = 60px per node
+  const H_GAP = 280;
+  const V_GAP = 60;
+  const NODE_W = 140;
+  const NODE_H = 32;
+  
+  const result = new Map();
+  for (const [L, layerNodes] of byLayer) {
+    const totalH = layerNodes.length * V_GAP;
+    layerNodes.forEach((n, i) => {
+      result.set(n.id, {
+        x: L * H_GAP,
+        y: i * V_GAP - totalH / 2,
+        w: NODE_W,
+        h: NODE_H,
+        layer: L,
+        name: n.name,
+        kind: n.kind
+      });
+    });
+  }
+  
+  return result;
+}
 
-    // Build the filtering tabs dynamically based on present kinds
-    function buildDynamicTabs() {
-      const tabContainer = document.querySelector('.tab-bar');
-      if (!tabContainer) return;
-
-      const presentKinds = new Set(allNodes.map(n => n.kind));
-      let html = '<button class="tab active" data-view="all">All</button>';
+// ── Render ──
+function render() {
+  const W = canvas.width / devicePixelRatio;
+  const H = canvas.height / devicePixelRatio;
+  
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  ctx.translate(W / 2 + camX, H / 2 + camY);
+  ctx.scale(camZoom, camZoom);
+  
+  // Draw edges
+  for (const e of validEdges) {
+    const from = layout.get(e.from);
+    const to = layout.get(e.to);
+    if (!from || !to) continue;
+    
+    const isHighlighted = selected && (e.from === selected.id || e.to === selected.id);
+    const isFaded = selected && !isHighlighted;
+    
+    if (isFaded) { ctx.globalAlpha = 0.06; }
+    else if (isHighlighted) { ctx.globalAlpha = 1; }
+    else { ctx.globalAlpha = 1; }
+    
+    const x1 = from.x + from.w;
+    const y1 = from.y + from.h / 2;
+    const x2 = to.x;
+    const y2 = to.y + to.h / 2;
+    
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    // Bezier curve
+    const cx1 = x1 + (x2 - x1) * 0.5;
+    const cx2 = x2 - (x2 - x1) * 0.5;
+    ctx.bezierCurveTo(cx1, y1, cx2, y2, x2, y2);
+    
+    if (isHighlighted) {
+      ctx.strokeStyle = EDGE_HIGHLIGHT[e.type] || '#60a5fa';
+      ctx.lineWidth = 2.5;
+    } else {
+      ctx.strokeStyle = EDGE_COLORS[e.type] || 'rgba(148,163,184,0.15)';
+      ctx.lineWidth = 1.2;
+    }
+    ctx.stroke();
+    
+    // Arrow at end
+    if (isHighlighted || !isFaded) {
+      const t = 0.95;
+      const ax = bezierPoint(x1, cx1, cx2, x2, t);
+      const ay = bezierPoint(y1, y1, y2, y2, t);
+      const bx = bezierPoint(x1, cx1, cx2, x2, t - 0.03);
+      const by = bezierPoint(y1, y1, y2, y2, t - 0.03);
+      const angle = Math.atan2(ay - by, ax - bx);
       
-      const orderedKinds = ['Function', 'Method', 'Class', 'Interface', 'Table', 'API', 'File', 'External', 'Test'];
-      orderedKinds.forEach(kind => {
-        if (presentKinds.has(kind)) {
-          const label = kind === 'Function' ? 'Functions' :
-                        kind === 'Method' ? 'Methods' :
-                        kind === 'Class' ? 'Classes' :
-                        kind === 'Interface' ? 'Interfaces' :
-                        kind === 'Table' ? 'Tables' :
-                        kind === 'API' ? 'APIs' :
-                        kind === 'File' ? 'Files' :
-                        kind === 'External' ? 'Externals' :
-                        kind === 'Test' ? 'Tests' : kind;
-          html += '<button class="tab" data-view="' + kind + '">' + label + '</button>';
-        }
-      });
-      tabContainer.innerHTML = html;
+      const sz = isHighlighted ? 8 : 5;
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(ax - sz * Math.cos(angle - 0.4), ay - sz * Math.sin(angle - 0.4));
+      ctx.lineTo(ax - sz * Math.cos(angle + 0.4), ay - sz * Math.sin(angle + 0.4));
+      ctx.closePath();
+      ctx.fillStyle = isHighlighted ? (EDGE_HIGHLIGHT[e.type] || '#60a5fa') : (EDGE_COLORS[e.type] || 'rgba(148,163,184,0.3)');
+      ctx.fill();
     }
+  }
+  
+  ctx.globalAlpha = 1;
+  
+  // Draw nodes
+  for (const n of allNodes) {
+    const pos = layout.get(n.id);
+    if (!pos) continue;
+    
+    const isVisible = activeFilter === 'all' || n.kind === activeFilter;
+    const isHovered = hovered && hovered.id === n.id;
+    const isSelected = selected && selected.id === n.id;
+    const isConnected = selected && isNodeConnected(n.id);
+    const isFaded = selected && !isSelected && !isConnected;
+    
+    if (isFaded) { ctx.globalAlpha = 0.1; }
+    else if (!isVisible) { ctx.globalAlpha = 0.08; }
+    else { ctx.globalAlpha = 1; }
+    
+    const color = KIND_COLORS[n.kind] || '#64748b';
+    const r = 6; // border radius
+    
+    // Node rectangle
+    ctx.beginPath();
+    roundRect(ctx, pos.x, pos.y, pos.w, pos.h, r);
+    
+    if (isHovered || isSelected) {
+      ctx.fillStyle = color + '30';
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 12;
+    } else {
+      ctx.fillStyle = color + '18';
+      ctx.strokeStyle = color + '50';
+      ctx.lineWidth = 1;
+      ctx.shadowBlur = 0;
+    }
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    
+    // Kind indicator bar on left
+    ctx.beginPath();
+    roundRectLeft(ctx, pos.x, pos.y, 4, pos.h, r);
+    ctx.fillStyle = color;
+    ctx.fill();
+    
+    // Node name
+    const maxTextW = pos.w - 16;
+    ctx.font = '600 11px Inter, system-ui, sans-serif';
+    ctx.fillStyle = isFaded ? '#475569' : (isSelected || isHovered ? '#ffffff' : color);
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    let label = pos.name;
+    if (ctx.measureText(label).width > maxTextW) {
+      while (ctx.measureText(label + '…').width > maxTextW && label.length > 3) label = label.slice(0, -1);
+      label += '…';
+    }
+    ctx.fillText(label, pos.x + 12, pos.y + pos.h / 2);
+    
+    // Kind badge on right
+    ctx.font = '700 8px Inter, system-ui, sans-serif';
+    const kindLabel = n.kind.slice(0, 4).toUpperCase();
+    const kindW = ctx.measureText(kindLabel).width + 8;
+    ctx.fillStyle = color + '25';
+    ctx.beginPath();
+    roundRect(ctx, pos.x + pos.w - kindW - 6, pos.y + pos.h / 2 - 7, kindW, 14, 3);
+    ctx.fill();
+    ctx.fillStyle = color;
+    ctx.textAlign = 'center';
+    ctx.fillText(kindLabel, pos.x + pos.w - kindW / 2 - 6, pos.y + pos.h / 2 + 1);
+  }
+  
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
 
-    // Force Simulation update ticks
-    function ticked() {
-      linksLayer.selectAll("path.link")
-        .attr("d", d => {
-          const from = d.source;
-          const to = d.target;
-          return 'M' + from.x + ',' + from.y + ' L' + to.x + ',' + to.y;
+// ── Bezier helper ──
+function bezierPoint(p0, p1, p2, p3, t) {
+  const u = 1 - t;
+  return u*u*u*p0 + 3*u*u*t*p1 + 3*u*t*t*p2 + t*t*t*p3;
+}
+
+// ── Rounded rect helpers ──
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.arcTo(x + w, y, x + w, y + r, r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+  ctx.lineTo(x + r, y + h);
+  ctx.arcTo(x, y + h, x, y + h - r, r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+  ctx.closePath();
+}
+
+function roundRectLeft(ctx, x, y, w, h, r) {
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w, y);
+  ctx.lineTo(x + w, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.arcTo(x, y + h, x, y + h - r, r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+  ctx.closePath();
+}
+
+// ── Connectivity check ──
+function isNodeConnected(id) {
+  if (!selected) return false;
+  for (const e of validEdges) {
+    if ((e.from === selected.id && e.to === id) || (e.to === selected.id && e.from === id)) return true;
+  }
+  return false;
+}
+
+// ── Hit test: find node under mouse ──
+function hitTest(mx, my) {
+  const W = canvas.width / devicePixelRatio;
+  const H = canvas.height / devicePixelRatio;
+  const worldX = (mx - W / 2 - camX) / camZoom;
+  const worldY = (my - H / 2 - camY) / camZoom;
+  
+  for (let i = allNodes.length - 1; i >= 0; i--) {
+    const n = allNodes[i];
+    const pos = layout.get(n.id);
+    if (!pos) continue;
+    if (worldX >= pos.x && worldX <= pos.x + pos.w && worldY >= pos.y && worldY <= pos.y + pos.h) {
+      return n;
+    }
+  }
+  return null;
+}
+
+// ── Mouse events ──
+canvas.addEventListener('mousedown', e => {
+  const node = hitTest(e.offsetX, e.offsetY);
+  if (node) {
+    selectNode(node.id);
+    return;
+  }
+  dragging = true;
+  dragStartX = e.clientX;
+  dragStartY = e.clientY;
+  camStartX = camX;
+  camStartY = camY;
+  canvas.style.cursor = 'grabbing';
+});
+
+canvas.addEventListener('mousemove', e => {
+  if (dragging) {
+    camX = camStartX + (e.clientX - dragStartX);
+    camY = camStartY + (e.clientY - dragStartY);
+    render();
+    return;
+  }
+  const node = hitTest(e.offsetX, e.offsetY);
+  if (node !== hovered) {
+    hovered = node;
+    canvas.style.cursor = node ? 'pointer' : 'grab';
+    render();
+  }
+});
+
+canvas.addEventListener('mouseup', () => {
+  dragging = false;
+  canvas.style.cursor = hovered ? 'pointer' : 'grab';
+});
+
+canvas.addEventListener('mouseleave', () => {
+  hovered = null;
+  render();
+});
+
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  const factor = e.deltaY > 0 ? 0.9 : 1.1;
+  camZoom = Math.max(0.05, Math.min(5, camZoom * factor));
+  document.getElementById('zoom-badge').textContent = Math.round(camZoom * 100) + '%';
+  render();
+}, { passive: false });
+
+// ── Sidebar list ──
+function renderList(query = '') {
+  const list = document.getElementById('nodelist');
+  const filtered = allNodes.filter(n => {
+    const matchKind = activeFilter === 'all' || n.kind === activeFilter;
+    const matchQ = !query || n.name.toLowerCase().includes(query.toLowerCase()) || (n.path || '').toLowerCase().includes(query.toLowerCase());
+    return matchKind && matchQ;
+  });
+  
+  list.innerHTML = filtered.slice(0, 200).map(n => {
+    const c = KIND_COLORS[n.kind] || '#64748b';
+    return '<li class="node-item' + (selected && selected.id === n.id ? ' selected' : '') + '" data-id="' + n.id + '">'
+      + '<span class="node-dot" style="background:' + c + '"></span>'
+      + '<div class="node-text"><div class="node-nm" style="color:' + c + '">' + esc(n.name) + '</div>'
+      + '<div class="node-pth">' + esc(n.path || n.id) + '</div></div>'
+      + '<span class="node-badge" style="background:' + c + '20;color:' + c + ';border:1px solid ' + c + '40">' + n.kind.slice(0, 4) + '</span>'
+      + '</li>';
+  }).join('');
+  
+  // Click handlers
+  list.querySelectorAll('.node-item').forEach(el => {
+    el.addEventListener('click', () => selectNode(el.dataset.id));
+  });
+}
+
+// ── Select node ──
+function selectNode(id) {
+  selected = allNodes.find(n => n.id === id) || null;
+  renderList(document.getElementById('search').value);
+  render();
+  if (selected) showDetail(selected);
+  else document.getElementById('detail').classList.remove('open');
+}
+
+// ── Detail panel ──
+async function showDetail(node) {
+  const panel = document.getElementById('detail');
+  const content = document.getElementById('detail-content');
+  panel.classList.add('open');
+  content.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-dim);">Analyzing...</div>';
+  
+  try {
+    const [neighborsData, impactData] = await Promise.all([
+      fetch('/api/neighbors/' + encodeURIComponent(node.id)).then(r => r.json()),
+      fetch('/api/impact/' + encodeURIComponent(node.id)).then(r => r.json())
+    ]);
+    
+    const neighbors = neighborsData.edges || [];
+    const neighborNodes = neighborsData.nodes || [];
+    const impact = (impactData.data || impactData);
+    const counts = impact.counts || {};
+    const totalImpact = Object.values(counts).reduce((a, b) => a + b, 0);
+    
+    const c = KIND_COLORS[node.kind] || '#64748b';
+    let h = '';
+    
+    h += '<span class="detail-badge" style="background:' + c + '20;color:' + c + ';border:1px solid ' + c + '40">' + node.kind + '</span>';
+    h += '<div class="detail-title" style="color:' + c + '">' + esc(node.name) + '</div>';
+    h += '<div class="detail-sub">' + esc(node.id) + '</div>';
+    
+    if (node.path) h += '<div class="detail-path">📄 ' + esc(node.path) + (node.startLine ? ':' + node.startLine : '') + '</div>';
+    if (node.signature) h += '<div class="detail-section"><div class="detail-section-title">Signature</div><div class="detail-sig">' + esc(node.signature) + '</div></div>';
+    
+    // Impact
+    h += '<div class="detail-section"><div class="detail-section-title">Impact (' + totalImpact + ' affected)</div>';
+    if (impact.riskChips && impact.riskChips.length > 0) {
+      impact.riskChips.forEach(r => { h += '<span class="risk-tag risk-' + r.kind + '">⬡ ' + esc(r.message) + '</span>'; });
+    } else {
+      h += '<div style="font-size:12px;color:var(--text-dim)">No critical risks</div>';
+    }
+    h += '</div>';
+    
+    // Why paths
+    if (impact.paths && impact.paths.length > 0) {
+      h += '<div class="detail-section"><div class="detail-section-title">Dependency Flows</div>';
+      impact.paths.slice(0, 4).forEach(p => {
+        h += '<div class="path-flow">';
+        p.steps.forEach(s => {
+          const fc = KIND_COLORS[s.fromType] || '#fff';
+          const tc = KIND_COLORS[s.toType] || '#fff';
+          h += '<div class="path-step"><span style="color:' + fc + ';font-weight:600">' + esc(s.from.split(':').pop()) + '</span>'
+            + '<span class="path-arrow">→</span>'
+            + '<span style="color:' + tc + '">' + esc(s.to.split(':').pop()) + '</span>'
+            + '<span style="color:var(--text-dim);font-size:10px">[' + s.edgeType + ']</span></div>';
         });
-
-      nodesLayer.selectAll("g.node-g")
-        .attr("transform", d => 'translate(' + d.x + ',' + d.y + ')');
-    }
-
-    // Interactive updates to SVG nodes and links
-    function updateGraphVisuals(validEdges) {
-      const activeKind = currentView;
-      const filterNodes = activeKind === 'all' ? allNodes : allNodes.filter(n => n.kind === activeKind);
-      const activeIds = new Set(filterNodes.map(n => n.id));
-
-      // Draw lines (Links)
-      const linkSelection = linksLayer.selectAll("path.link")
-        .data(validEdges, d => d.id);
-
-      linkSelection.exit().remove();
-
-      // Insert new links with semantic arrowheads
-      const linkEnter = linkSelection.enter().append("path")
-        .attr("class", d => "link type-" + d.type)
-        .attr("id", d => d.id)
-        .attr("marker-end", d => "url(#arrow-" + d.type + ")")
-        .on("click", (event, d) => {
-          event.stopPropagation();
-          selectNode(d.source.id);
-        });
-
-      // Merge & update attributes
-      const linkAll = linkEnter.merge(linkSelection)
-        .attr("marker-end", d => {
-          const isSelectedPath = selectedNode && (d.source.id === selectedNode.id || d.target.id === selectedNode.id);
-          return isSelectedPath ? "url(#arrow-" + d.type + "-highlight)" : "url(#arrow-" + d.type + ")";
-        });
-
-      // Draw Nodes (Groups)
-      const nodeSelection = nodesLayer.selectAll("g.node-g")
-        .data(allNodes, d => d.id);
-
-      nodeSelection.exit().remove();
-
-      const nodeEnter = nodeSelection.enter().append("g")
-        .attr("class", "node-g")
-        .on("click", (event, d) => {
-          event.stopPropagation();
-          triggerPressEffect(event, d);
-          selectNode(d.id);
-        })
-        .on("mouseover", (event, d) => {
-          setNodeHover(d, true);
-        })
-        .on("mouseout", (event, d) => {
-          setNodeHover(d, false);
-        })
-        .call(d3.drag()
-          .on("start", dragstarted)
-          .on("drag", dragged)
-          .on("end", dragended)
-        );
-
-      // Circle representing actual visual node
-      nodeEnter.append("circle")
-        .attr("class", "node-circle")
-        .attr("r", d => getRadius(d))
-        .attr("fill", d => kindColors[d.kind] || '#888')
-        .attr("fill-opacity", d => d.kind === 'File' ? 0.2 : 0.8)
-        .attr("stroke", d => {
-          return d3.color(kindColors[d.kind] || '#888').darker(0.3);
-        })
-        .attr("stroke-width", d => d.kind === 'File' ? 2 : 1.5);
-
-      // Concentric rings for Tables and APIs (gives modular depth)
-      nodeEnter.filter(d => d.kind === 'API' || d.kind === 'Table')
-        .append("circle")
-        .attr("class", "outer-ring")
-        .attr("r", d => getRadius(d) + 5)
-        .attr("fill", "none")
-        .attr("stroke", d => kindColors[d.kind])
-        .attr("stroke-opacity", 0.35)
-        .attr("stroke-width", 1);
-
-      // Text labels for symbols
-      nodeEnter.append("text")
-        .attr("class", "node-label")
-        .attr("y", d => -getRadius(d) - 6)
-        .attr("text-anchor", "middle")
-        .text(d => d.name);
-
-      const nodeAll = nodeEnter.merge(nodeSelection);
-
-      // Apply Filter visual fades (Highlight view)
-      nodeAll.each(function(d) {
-        const el = d3.select(this);
-        const matchesType = activeIds.has(d.id);
-        el.classed("fade", !matchesType);
-        el.select("text.node-label").style("opacity", matchesType ? (d.kind === 'File' ? 0.4 : 0.8) : 0.05);
+        h += '</div>';
       });
-
-      // Restart force physics
-      simulation.alpha(0.3).restart();
+      h += '</div>';
     }
+    
+    // Connections
+    h += '<div class="detail-section"><div class="detail-section-title">Connections (' + neighbors.length + ')</div>';
+    neighbors.forEach((e, i) => {
+      const sn = neighborNodes[i] || { name: e.to, kind: 'Unknown' };
+      const isOut = e.from === node.id;
+      const nc = KIND_COLORS[sn.kind] || '#94a3b8';
+      const ec = EDGE_HIGHLIGHT[e.type] || '#64748b';
+      h += '<div class="conn-item" data-goto="' + esc(sn.id) + '">'
+        + '<span style="color:' + nc + ';font-weight:600">' + esc(sn.name) + ' <span style="color:var(--text-dim);font-size:10px">' + sn.kind + '</span></span>'
+        + '<span style="color:' + ec + ';font-size:11px;font-weight:700">' + (isOut ? '→' : '←') + ' ' + e.type + '</span></div>';
+    });
+    if (neighbors.length === 0) h += '<div style="font-size:12px;color:var(--text-dim)">Isolated</div>';
+    h += '</div>';
+    
+    content.innerHTML = h;
+    
+    // Click connections to navigate
+    content.querySelectorAll('.conn-item[data-goto]').forEach(el => {
+      el.addEventListener('click', () => selectNode(el.dataset.goto));
+    });
+  } catch (err) {
+    content.innerHTML = '<div style="color:#f87171;text-align:center;padding:40px">Failed to load details</div>';
+  }
+}
 
-    // Hover Highlight Spotlight Spotlight with semantic colors
-    function setNodeHover(node, isHover) {
-      hoveredNode = isHover ? node : null;
+// ── Zoom to fit ──
+function fitGraph() {
+  if (layout.size === 0) return;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const [id, pos] of layout) {
+    minX = Math.min(minX, pos.x);
+    maxX = Math.max(maxX, pos.x + pos.w);
+    minY = Math.min(minY, pos.y);
+    maxY = Math.max(maxY, pos.y + pos.h);
+  }
+  const W = canvas.width / devicePixelRatio;
+  const H = canvas.height / devicePixelRatio;
+  const gw = maxX - minX + 100;
+  const gh = maxY - minY + 100;
+  camZoom = Math.min(W / gw, H / gh) * 0.85;
+  camZoom = Math.max(0.05, Math.min(2, camZoom));
+  camX = -(minX + maxX) / 2 * camZoom;
+  camY = -(minY + maxY) / 2 * camZoom;
+  document.getElementById('zoom-badge').textContent = Math.round(camZoom * 100) + '%';
+}
 
-      if (!isHover) {
-        // Reset all faded items
-        nodesLayer.selectAll("g.node-g").classed("fade", false);
-        linksLayer.selectAll("path.link")
-          .classed("highlight", false)
-          .classed("fade", false)
-          .attr("marker-end", d => "url(#arrow-" + d.type + ")");
-        nodesLayer.selectAll("text.node-label").classed("active", false);
-        nodesLayer.selectAll("circle.node-circle")
-          .attr("filter", null)
-          .attr("r", d => getRadius(d))
-          .attr("stroke-width", d => d.kind === 'File' ? 2 : 1.5);
-        return;
-      }
+// ── Init ──
+async function init() {
+  try {
+    const data = await fetch('/api/graph').then(r => r.json());
+    allNodes = data.nodes || [];
+    allEdges = data.edges || [];
+    nodeMap = new Map(allNodes.map(n => [n.id, n]));
+    
+    // Filter valid edges
+    const ids = new Set(allNodes.map(n => n.id));
+    validEdges = allEdges.filter(e => {
+      const f = typeof e.from === 'object' ? e.from.id : e.from;
+      const t = typeof e.to === 'object' ? e.to.id : e.to;
+      return ids.has(f) && ids.has(t) && f !== t;
+    });
+    
+    // Stats
+    document.getElementById('s-nodes').textContent = allNodes.length;
+    document.getElementById('s-edges').textContent = validEdges.length;
+    
+    // Layout
+    layout = computeLayout(allNodes, validEdges);
+    fitGraph();
+    
+    // Filters
+    buildFilters();
+    renderList();
+    render();
+    
+    // Diff files
+    loadDiff();
+  } catch (err) {
+    console.error('Init failed:', err);
+  }
+}
 
-      // Spotlight effect: find 1st degree connected symbols
-      const connectedNodeIds = new Set([node.id]);
-      const connectedLinkIds = new Set();
+function buildFilters() {
+  const kinds = {};
+  allNodes.forEach(n => { kinds[n.kind] = (kinds[n.kind] || 0) + 1; });
+  const ordered = ['Function', 'Method', 'Class', 'Interface', 'Table', 'API', 'Route', 'External', 'Test', 'Module', 'Package', 'File', 'Service'];
+  let h = '<button class="filter-btn active" data-f="all">All</button>';
+  ordered.forEach(k => {
+    if (kinds[k]) h += '<button class="filter-btn" data-f="' + k + '">' + k + (kinds[k] > 1 ? ' (' + kinds[k] + ')' : '') + '</button>';
+  });
+  document.getElementById('filters').innerHTML = h;
+  document.getElementById('filters').addEventListener('click', e => {
+    const btn = e.target.closest('.filter-btn');
+    if (!btn) return;
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    activeFilter = btn.dataset.f;
+    renderList(document.getElementById('search').value);
+    render();
+  });
+}
 
-      allEdges.forEach(edge => {
-        const srcId = typeof edge.source === 'object' ? edge.source.id : edge.source;
-        const tgtId = typeof edge.target === 'object' ? edge.target.id : edge.target;
-        if (srcId === node.id) {
-          connectedNodeIds.add(tgtId);
-          connectedLinkIds.add(edge.id);
-        } else if (tgtId === node.id) {
-          connectedNodeIds.add(srcId);
-          connectedLinkIds.add(edge.id);
+async function loadDiff() {
+  try {
+    const data = await fetch('/api/diff').then(r => r.json());
+    const files = data.files || [];
+    if (files.length === 0) return;
+    diffFiles = files;
+    
+    const section = document.getElementById('diff-section');
+    const list = document.getElementById('diff-list');
+    section.style.display = 'block';
+    list.innerHTML = files.slice(0, 15).map(f =>
+      '<div class="diff-file" data-file="' + esc(f) + '">' + esc(f) + '</div>'
+    ).join('');
+    document.getElementById('diff-count').textContent = files.length + ' changed file' + (files.length !== 1 ? 's' : '');
+    
+    list.querySelectorAll('.diff-file').forEach(el => {
+      el.addEventListener('click', async () => {
+        const fname = el.dataset.file;
+        const res = await fetch('/api/diff-impact?file=' + encodeURIComponent(fname)).then(r => r.json());
+        if (res.nodes) {
+          // Highlight impacted nodes
+          const impactedIds = new Set(res.nodes.map(n => n.id));
+          selected = null;
+          render();
         }
       });
+    });
+  } catch {}
+}
 
-      // Apply transitions & glows
-      nodesLayer.selectAll("g.node-g").each(function(d) {
-        const matches = connectedNodeIds.has(d.id);
-        const el = d3.select(this);
-        el.classed("fade", !matches);
-        
-        const isHoverTarget = d.id === node.id;
-        el.select("circle.node-circle")
-          .attr("r", isHoverTarget ? getRadius(d) * 1.3 : getRadius(d))
-          .attr("stroke-width", isHoverTarget ? 3.5 : (d.kind === 'File' ? 2 : 1.5))
-          .attr("filter", isHoverTarget ? "url(#glow)" : null);
+// ── Search ──
+document.getElementById('search').addEventListener('input', e => renderList(e.target.value));
 
-        el.select("text.node-label")
-          .classed("active", isHoverTarget);
-      });
+// ── Close detail ──
+document.getElementById('detail-close').addEventListener('click', () => {
+  selected = null;
+  document.getElementById('detail').classList.remove('open');
+  renderList(document.getElementById('search').value);
+  render();
+});
 
-      linksLayer.selectAll("path.link").each(function(d) {
-        const matches = connectedLinkIds.has(d.id);
-        d3.select(this)
-          .classed("highlight", matches)
-          .classed("fade", !matches)
-          .attr("marker-end", d => matches ? "url(#arrow-" + d.type + "-highlight)" : "url(#arrow-" + d.type + ")");
-      });
-    }
+// ── Keyboard ──
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    selected = null;
+    document.getElementById('detail').classList.remove('open');
+    renderList(document.getElementById('search').value);
+    render();
+  }
+});
 
-    // Trigger explosive Press Particle ripple effect on click
-    function triggerPressEffect(event, d) {
-      const [mx, my] = d3.pointer(event, svg.node());
-
-      const ripple = svg.append("circle")
-        .attr("class", "press-ripple")
-        .attr("cx", mx)
-        .attr("cy", my)
-        .attr("r", 5)
-        .attr("stroke", kindColors[d.kind] || '#ffffff')
-        .style("stroke-opacity", 1);
-
-      ripple.transition()
-        .duration(600)
-        .ease(d3.easeQuadOut)
-        .attr("r", 80)
-        .style("stroke-opacity", 0)
-        .remove();
-    }
-
-    // Drag gestures callbacks for force-directed layout
-    function dragstarted(event, d) {
-      if (!event.active) simulation.alphaTarget(0.1).restart();
-      d.fx = d.x;
-      d.fy = d.y;
-    }
-
-    // Swipe dragging momentum
-    function dragged(event, d) {
-      d.fx = event.x;
-      d.fy = event.y;
-    }
-
-    function dragended(event, d) {
-      if (!event.active) simulation.alphaTarget(0);
-      d.fx = null;
-      d.fy = null;
-    }
-
-    // Select code node, zoom to it, and fetch detailed dependencies
-    async function selectNode(id) {
-      selectedNode = allNodes.find(n => n.id === id) || null;
-      
-      // Highlight row selection in left sidebar
-      renderNodeList(document.getElementById('search').value);
-
-      if (!selectedNode) {
-        document.getElementById('detail-panel').classList.remove('open');
-        updateGraphVisuals(allEdges);
-        return;
-      }
-
-      // Smooth camera pan-and-center to targeted node
-      const width = svg.node().clientWidth || window.innerWidth - 360;
-      const height = svg.node().clientHeight || window.innerHeight;
-
-      svg.transition()
-        .duration(800)
-        .ease(d3.easeCubicInOut)
-        .call(
-          zoomBehavior.transform,
-          d3.zoomIdentity
-            .translate(width / 2, height / 2)
-            .scale(1.2)
-            .translate(-selectedNode.x, -selectedNode.y)
-        );
-
-      // Re-filter and update
-      const nodeIds = new Set(allNodes.map(n => n.id));
-      const validEdges = allEdges.filter(e => {
-        const fromId = typeof e.from === 'object' ? e.from.id : e.from;
-        const toId = typeof e.to === 'object' ? e.to.id : e.to;
-        return nodeIds.has(fromId) && nodeIds.has(toId);
-      });
-
-      updateGraphVisuals(validEdges);
-      showDetail(selectedNode);
-    }
-
-    // Fetch and show deep analysis report
-    async function showDetail(node) {
-      const panel = d3.select("#detail-panel");
-      const content = document.getElementById('detailContent');
-      panel.classed("open", true);
-
-      content.innerHTML = \`<div style="text-align: center; padding: 40px; color: var(--text-muted);">Analyzing code relationships...</div>\`;
-
-      try {
-        // Fetch neighbours & impact report
-        const [neighborsData, impactData] = await Promise.all([
-          d3.json('/api/neighbors/' + encodeURIComponent(node.id)),
-          d3.json('/api/impact/' + encodeURIComponent(node.id))
-        ]);
-
-        const neighbors = neighborsData.edges || [];
-        const neighborNodes = neighborsData.nodes || [];
-        const impact = impactData.data || {};
-        const totalImpact = impact.counts ? Object.values(impact.counts).reduce((a, b) => a + b, 0) : 0;
-
-        // Draw animated data pulses along active impact flow lines
-        drawFlowPulses(neighbors);
-
-        let html = \`
-          <span class="node-kind-badge badge-\${node.kind}">\${node.kind}</span>
-          <h1 style="font-size: 20px; font-weight:800; margin-top:8px; line-height:1.2; word-break:break-all; color:\${kindColors[node.kind]}">\${node.name}</h1>
-          <p style="font-family:monospace; font-size:11px; color:var(--text-muted); margin-top:4px; word-break:break-all;">\${node.id}</p>
-        \`;
-
-        if (node.path) {
-          html += \`<p style="font-size:12px; color:#ffffff; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom:12px; margin: 12px 0; font-weight:500;">📄 \${node.path}\text\${node.startLine ? ':' + node.startLine : ''}</p>\`;
-        }
-
-        if (node.signature) {
-          html += \`
-            <div class="detail-section">
-              <div class="section-title">Declaration Signature</div>
-              <div class="signature-box">\${escapeHTML(node.signature)}</div>
-            </div>
-          \`;
-        }
-
-        // Blast radius & Risk factors
-        html += \`
-          <div class="detail-section">
-            <div class="section-title">Impact Blast Radius (\${totalImpact} Affected Modules)</div>
-            <div style="margin-top: 6px;">
-        \`;
-
-        if (impact.riskChips && impact.riskChips.length > 0) {
-          impact.riskChips.forEach(r => {
-            html += \`<span class="risk-chip risk-\${r.kind}">⬡ \${r.message}</span>\`;
-          });
-        } else {
-          html += \`<p style="font-size:12px; color:var(--text-muted);">No critical architectural risk factors found.</p>\`;
-        }
-
-        html += \`</div></div>\`;
-
-        // Interactive why-paths / Dependency Flows
-        if (impact.paths && impact.paths.length > 0) {
-          html += \`
-            <div class="detail-section">
-              <div class="section-title">Evidence-Backed Dependency Flows</div>
-              <div style="display:flex; flex-direction:column; gap:8px; margin-top:6px;">
-          \`;
-
-          impact.paths.slice(0, 5).forEach(p => {
-            html += \`<div class="why-path">\`;
-            p.steps.forEach(s => {
-              html += \`
-                <div class="why-step">
-                  <span style="font-weight:600; color:\${kindColors[s.fromType] || '#fff'};">\${s.from.split(':').pop()}</span>
-                  <span class="arrow">→</span>
-                  <span style="color:\${kindColors[s.toType] || '#fff'};">\text\${s.to.split(':').pop()}</span>
-                  <span style="color:var(--text-muted); font-size:10px;">[\${s.edgeType}]</span>
-                </div>
-              \`;
-            });
-            html += \`</div>\`;
-          });
-
-          html += \`</div></div>\`;
-        }
-
-        // Neighbors List
-        html += \`
-          <div class="detail-section">
-            <div class="section-title">Direct Connections (\${neighbors.length})</div>
-            <div style="display:flex; flex-direction:column; gap:6px; margin-top:6px;">
-        \`;
-
-        if (neighbors.length > 0) {
-          neighbors.forEach((e, i) => {
-            const sideNode = neighborNodes[i] || { name: e.to, id: e.to, kind: 'Unknown' };
-            const isOutgoing = e.from === node.id;
-            const arrowChar = isOutgoing ? '→' : '←';
-
-            html += \`
-              <div class="neighbor-item" onclick="selectNode('\${sideNode.id}')">
-                <div>
-                  <span style="font-weight:600; color:\${kindColors[sideNode.kind] || '#fff'};">\${sideNode.name}</span>
-                  <div style="font-size:10px; color:var(--text-muted);">\${sideNode.kind}</div>
-                </div>
-                <div style="font-size:11px; font-weight:700; color: \${edgeColors[e.type] || '#ffffff'};">
-                  \${arrowChar} \${e.type}
-                </div>
-              </div>
-            \`;
-          });
-        } else {
-          html += \`<p style="font-size:12px; color:var(--text-muted);">This component is isolated.</p>\`;
-        }
-
-        html += \`</div></div>\`;
-
-        content.innerHTML = html;
-
-      } catch (err) {
-        console.error(err);
-        content.innerHTML = \`<div style="color:#ffffff; padding: 40px; text-align:center;">Failed to run impact query.</div>\`;
-      }
-    }
-
-    // Creates beautiful glowing pulses moving along the dependency links (color matched!)
-    function drawFlowPulses(neighborEdges) {
-      pulsesLayer.selectAll("circle.pulse-dot").remove();
-
-      neighborEdges.forEach(edge => {
-        const pathEl = document.getElementById(edge.id);
-        if (!pathEl) return;
-
-        // Add moving glowing particle with color matched to edge semantic type
-        const dotColor = edgeColors[edge.type] || '#ffffff';
-        const dot = pulsesLayer.append("circle")
-          .attr("class", "pulse-dot")
-          .attr("r", 3.5)
-          .attr("fill", dotColor);
-
-        dot.append("animateMotion")
-          .attr("dur", edge.type === 'EXPOSES' ? "1.2s" : "2.0s") // APIs pulse faster!
-          .attr("repeatCount", "indefinite")
-          .attr("path", pathEl.getAttribute("d"));
-      });
-    }
-
-    function escapeHTML(str) {
-      return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    }
-
-    // Sync left sidebar list
-    function renderNodeList(query = '') {
-      const list = document.getElementById('nodeList');
-      const activeKind = currentView;
-      
-      const filtered = allNodes.filter(n => {
-        const matchesKind = activeKind === 'all' || n.kind === activeKind;
-        const matchesSearch = !query || n.name.toLowerCase().includes(query.toLowerCase()) || n.id.toLowerCase().includes(query.toLowerCase());
-        return matchesKind && matchesSearch;
-      });
-
-      list.innerHTML = filtered.slice(0, 150).map(n => \`
-        <li class="node-item \${selectedNode?.id === n.id ? 'selected' : ''}" onclick="selectNode('\${n.id}')">
-          <div class="node-header-row">
-            <span class="node-name" style="color: \${kindColors[n.kind] || '#fff'}">\${n.name}</span>
-            <span class="node-kind-badge badge-\${n.kind}">\${n.kind.slice(0,4)}</span>
-          </div>
-          <div class="node-path-row">\${n.path || n.id}</div>
-        </li>
-      \`).join('');
-    }
-
-    function initEvents() {
-      // Close side panel
-      document.getElementById('closeDetail').addEventListener('click', () => {
-        selectedNode = null;
-        document.getElementById('detail-panel').classList.remove('open');
-        pulsesLayer.selectAll("circle.pulse-dot").remove();
-        
-        const nodeIds = new Set(allNodes.map(n => n.id));
-        const validEdges = allEdges.filter(e => {
-          const fromId = typeof e.from === 'object' ? e.from.id : e.from;
-          const toId = typeof e.to === 'object' ? e.to.id : e.to;
-          return nodeIds.has(fromId) && nodeIds.has(toId);
-        });
-        updateGraphVisuals(validEdges);
-      });
-
-      // Interactive real-time search
-      document.getElementById('search').addEventListener('input', (e) => {
-        renderNodeList(e.target.value);
-      });
-
-      // Filter Tabs (Delegated registry because tabs are dynamically created!)
-      document.querySelector('.tab-bar').addEventListener('click', (e) => {
-        const tab = e.target.closest('.tab');
-        if (!tab) return;
-
-        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-        tab.classList.add('active');
-        currentView = tab.dataset.view;
-        
-        renderNodeList(document.getElementById('search').value);
-        
-        const nodeIds = new Set(allNodes.map(n => n.id));
-        const validEdges = allEdges.filter(e => {
-          const fromId = typeof e.from === 'object' ? e.from.id : e.from;
-          const toId = typeof e.to === 'object' ? e.to.id : e.to;
-          return nodeIds.has(fromId) && nodeIds.has(toId);
-        });
-        updateGraphVisuals(validEdges);
-      });
-    }
-
-    // Run
-    init();
-  </script>
+// Start
+init();
+</script>
 </body>
 </html>`;
 }
@@ -1216,12 +868,46 @@ export async function startUIServer(port = DEFAULT_PORT): Promise<void> {
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = req.url ?? '/';
 
-    // API routes
     if (url === '/api/graph' && req.method === 'GET') {
-      const nodes = store.listNodes(undefined, 5000);
-      const edges = nodes.flatMap(n => store.getOutEdges(n.id));
+      const view = projectView(store, 'height');
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ nodes, edges }));
+      res.end(JSON.stringify({ nodes: view.nodes, edges: view.edges }));
+      return;
+    }
+
+    if (url.startsWith('/api/view') && req.method === 'GET') {
+      const q = new URL(url, 'http://127.0.0.1').searchParams;
+      const mode = (q.get('mode') || 'height') as ViewMode;
+      const focus = q.get('focus') || undefined;
+      const view = projectView(store, mode, focus || undefined);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(view));
+      return;
+    }
+
+    if (url === '/api/diff' && req.method === 'GET') {
+      const files = getGitDiff();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ files }));
+      return;
+    }
+
+    if (url.startsWith('/api/diff-impact') && req.method === 'GET') {
+      const q = new URL(url, 'http://127.0.0.1').searchParams;
+      const fname = q.get('file') || '';
+      // Find nodes in that file
+      const nodes = store.listNodesByKinds(['Function', 'Method', 'Class', 'Interface', 'API', 'Table', 'Test', 'Module', 'Route', 'External', 'Package'], 500)
+        .filter(n => n.path === fname || (n.path || '').startsWith(fname.replace(/\.[^.]+$/, '')));
+      const ids = new Set(nodes.map(n => n.id));
+      // Impact each
+      const allImpactNodes: any[] = [];
+      for (const n of nodes.slice(0, 5)) {
+        const impact = computeImpact(store, [n.id], { direction: 'downstream' });
+        allImpactNodes.push(...impact.nodes);
+      }
+      const uniqueNodes = [...new Map(allImpactNodes.map(n => [n.id, n])).values()];
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ nodes: uniqueNodes }));
       return;
     }
 
@@ -1245,6 +931,26 @@ export async function startUIServer(port = DEFAULT_PORT): Promise<void> {
       return;
     }
 
+    if (url.startsWith('/api/explain/') && req.method === 'GET') {
+      const nodeId = decodeURIComponent(url.slice('/api/explain/'.length));
+      const node = store.resolveNode(nodeId);
+      if (!node) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, data: { error: 'not found' } }));
+        return;
+      }
+      const impact = computeImpact(store, [node.id], { direction: 'downstream' });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(envelope(explainImpact(store, impact))));
+      return;
+    }
+
+    if (url === '/api/insights' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(envelope(computeInsights(store))));
+      return;
+    }
+
     if (url === '/api/health' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(envelope(healthCheck(store))));
@@ -1257,7 +963,7 @@ export async function startUIServer(port = DEFAULT_PORT): Promise<void> {
   });
 
   server.listen(port, '127.0.0.1', () => {
-    console.log(`archmap ui serving at http://127.0.0.1:${port}`);
+    console.log(`archmap visualizer at http://127.0.0.1:${port}`);
   });
 
   process.on('SIGINT', () => {

@@ -17,24 +17,24 @@ npx archmap <command>
 ## Quick Start
 
 ```bash
-# Initialize a repo — indexes everything into one graph
+# Index the repo into one graph
 archmap init .
 
-# What's affected if I change processPayment?
-archmap impact fn:src/payments/service.ts:processPayment
+# Non-coder / overview
+archmap guide              # walkthrough
+archmap summary            # what is in this codebase
+archmap insights           # cycles, coupling, hotspots
+archmap ui                 # visual map (overview first, not a file hairball)
 
-# Find a function
-archmap search processPayment
-
-# See why-path between two functions
-archmap why_path fn:src/payments/service.ts:processPayment fn:src/orders/service.ts:createOrder
-
-# Check graph health
-archmap health
-
-# View the architecture in a browser
-archmap ui
+# Coder / change-safety
+archmap explain <name>     # what this is, who uses it
+archmap impact <name>      # what else could break, and why
+archmap tests <name>       # which tests to run
+archmap plan_change <name> # files you are allowed to edit
+archmap trace A B          # evidence-backed why-path
 ```
+
+Every command supports `--json` for agents and CI.
 
 ## Commands
 
@@ -54,8 +54,10 @@ archmap ui
 | `archmap docs <name>` | Resolve documentation |
 | `archmap pin --from --to --type` | Add user-confirmed edge |
 | `archmap health` | Graph consistency + inference health |
+| `archmap insights` | Cycles, coupling, bottlenecks, hubs, isolated modules, hotspots |
+| `archmap docs <name>` | In-repo README / ADR / docs for a component |
 | `archmap plan_change <id>` | Bounded mutation envelope |
-| `archmap ui` | Localhost visualizer |
+| `archmap ui` | Localhost visualizer (Overview / Code / Insights) |
 | `archmap mcp` | MCP server over stdio |
 | `archmap serve` | Optional HTTP daemon |
 
@@ -89,7 +91,7 @@ archmap/
 
 - **One graph of truth.** One SQLite database, one set of nodes and edges.
 - **Evidence-backed edges.** Every edge has file, line, and snippet evidence.
-- **Stable IDs.** `fn:src/app.ts:main`, `api:POST:/payments`, `table:users`.
+- **Stable IDs.** `fn:src/app.ts:main`, `api:POST:/items`, `table:users`.
 - **Deterministic.** Works fully with zero AI. LLM features are opt-in.
 - **Any language.** Regex-based extraction works everywhere; tree-sitter is the upgrade path.
 
