@@ -340,6 +340,43 @@ function resolveImportPath(currentFile: string, importPath: string, allFiles: st
   return null;
 }
 
+// ─── Single File Parser Helper ──────────────────────────────────────────────────
+
+export function parseSingleFile(repoPath: string, relPath: string): ParseResult {
+  const nodes: GraphNode[] = [];
+  const edges: GraphEdge[] = [];
+  const now = new Date().toISOString();
+  
+  const filePath = join(repoPath, relPath);
+  let content: string;
+  try {
+    content = readFileSync(filePath, 'utf-8');
+  } catch {
+    return { nodes, edges };
+  }
+
+  const lines = content.split('\n');
+  const fId = fileId(relPath);
+  const ext = extname(filePath).toLowerCase();
+  const lang = LANGUAGE_MAP[ext];
+
+  const meta: FileMeta = {
+    relPath,
+    lang: lang || 'unknown',
+    fId,
+    content,
+    lines,
+    definitions: new Map(),
+    imports: new Map(),
+    wildcardImports: [],
+    instantiations: new Map(),
+    funcDefs: [],
+  };
+
+  extractPass1(meta, [relPath], nodes, edges, now);
+  return { nodes, edges };
+}
+
 // ─── Main Pipeline ─────────────────────────────────────────────────────────────
 
 export function parseRepository(repoPath: string): ParseResult {
