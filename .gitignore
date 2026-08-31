@@ -2,14 +2,10 @@ node_modules/
 dist/
 *.tsbuildinfo
 
-# archmap workspace files (generated per-project)
-.archmap/index.db
-.archmap/vectors/
-.archmap/cache/
-.archmap/daemon.json
-.archmap/agent-runs/
-
 # logs
 *.log
 
 .archmap
+
+.env
+!.env.example

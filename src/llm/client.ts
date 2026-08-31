@@ -14,8 +14,11 @@ export interface LLMConfig {
 }
 
 const XAI_BASE = 'https://api.x.ai/v1';
+const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/openai';
 const DEFAULT_STRONG = 'grok-4.6';
 const DEFAULT_CHEAP = 'grok-4.3';
+const GEMINI_STRONG = 'gemini-3.1-pro-preview';
+const GEMINI_CHEAP = 'gemini-3.6-flash';
 
 /** USD per million tokens. Operational metadata only — never graph truth. */
 const PRICE: Record<string, { in: number; out: number; cached: number }> = {
@@ -26,18 +29,34 @@ const PRICE: Record<string, { in: number; out: number; cached: number }> = {
 };
 
 export function loadLLMConfig(): LLMConfig {
-  const apiKey = (process.env.ARCHMAP_LLM_API_KEY || process.env.XAI_API_KEY || '').trim();
   const explicitBase = (process.env.ARCHMAP_LLM_BASE_URL || '').trim().replace(/\/$/, '');
-  const baseUrl = explicitBase || (apiKey ? XAI_BASE : '');
-  const provider = baseUrl.includes('x.ai') ? 'xai' : (baseUrl ? 'openai-compatible' : 'none');
+  const archKey = (process.env.ARCHMAP_LLM_API_KEY || '').trim();
+  const geminiKey = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim();
+  const xaiKey = (process.env.XAI_API_KEY || '').trim();
+
+  let apiKey = '';
+  let baseUrl = explicitBase;
+  if (archKey) {
+    apiKey = archKey;
+    if (!baseUrl) baseUrl = geminiKey ? GEMINI_BASE : XAI_BASE;
+  } else if (geminiKey) {
+    apiKey = geminiKey;
+    if (!baseUrl) baseUrl = GEMINI_BASE;
+  } else if (xaiKey) {
+    apiKey = xaiKey;
+    if (!baseUrl) baseUrl = XAI_BASE;
+  }
+
+  const isGemini = baseUrl.includes('googleapis.com') || baseUrl.includes('generativelanguage');
+  const provider = isGemini ? 'gemini' : baseUrl.includes('x.ai') ? 'xai' : (baseUrl ? 'openai-compatible' : 'none');
   return {
     configured: Boolean(apiKey && baseUrl),
     provider,
     baseUrl,
     apiKey,
-    strongModel: process.env.ARCHMAP_LLM_MODEL || DEFAULT_STRONG,
-    cheapModel: process.env.ARCHMAP_LLM_CHEAP_MODEL || DEFAULT_CHEAP,
-    timeoutMs: Number(process.env.ARCHMAP_LLM_TIMEOUT_MS || 20000),
+    strongModel: process.env.ARCHMAP_LLM_MODEL || (isGemini ? GEMINI_STRONG : DEFAULT_STRONG),
+    cheapModel: process.env.ARCHMAP_LLM_CHEAP_MODEL || (isGemini ? GEMINI_CHEAP : DEFAULT_CHEAP),
+    timeoutMs: Number(process.env.ARCHMAP_LLM_TIMEOUT_MS || 60000),
   };
 }
 
@@ -104,11 +123,19 @@ export async function chatComplete(req: ChatRequest): Promise<ChatResult | null>
         temperature: req.temperature ?? 0,
         max_tokens: req.maxTokens ?? 1200,
         messages: req.messages,
-        ...(req.json ? { response_format: { type: 'json_object' } } : {}),
+        ...(req.json && cfg.provider !== 'gemini' ? { response_format: { type: 'json_object' } } : {}),
       }),
       signal: ctrl.signal,
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      const errBody = await res.text();
+      if (res.status === 429) {
+        console.error(`[LLM] Rate limited / spending cap exceeded. Visit https://ai.studio/spend to manage your cap.`);
+      } else {
+        console.error(`[LLM] API error ${res.status}: ${errBody.slice(0, 300)}`);
+      }
+      return null;
+    }
     const body = await res.json() as {
       choices?: Array<{ message?: { content?: string } }>;
       usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
@@ -131,7 +158,8 @@ export async function chatComplete(req: ChatRequest): Promise<ChatResult | null>
         latency_ms: Date.now() - t0,
       },
     };
-  } catch {
+  } catch (err: any) {
+    console.error(`[LLM] Error: ${err?.message || err}`);
     return null;
   } finally {
     clearTimeout(timer);

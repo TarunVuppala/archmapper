@@ -5,6 +5,12 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, extname } from 'node:path';
 import type { GraphNode, GraphEdge, NodeKind, EdgeKind, Evidence } from '../core/types.js';
 import { fileId, functionId, classId, interfaceId, tableId, edgeId, apiId, docId } from '../core/ids.js';
+import { parseAllAPISpecs } from './openapi.js';
+import { parseAllInfra } from './infra.js';
+import { detectCoChanges } from './git-cochange.js';
+import { ingestCoverage } from './coverage.js';
+import { fetchExternalDocs, findInRepoDocs } from '../core/docs-fetch.js';
+import { parseCodeOwners } from './codeowners.js';
 
 export interface ParseResult {
   nodes: GraphNode[];
@@ -467,6 +473,40 @@ export function parseRepository(repoPath: string): ParseResult {
   }
 
   extractManifests(repoPath, relativeFiles, files, nodes, edges, now);
+
+  // ─── Additional Ingestion Passes ──────────────────────────────────────────
+  // OpenAPI / AsyncAPI / Proto specs
+  const apiSpecs = parseAllAPISpecs(repoPath, relativeFiles, now);
+  nodes.push(...apiSpecs.nodes);
+  edges.push(...apiSpecs.edges);
+
+  // Infrastructure: Docker Compose, Terraform, Kubernetes, Helm
+  const infraResult = parseAllInfra(repoPath, relativeFiles, now);
+  nodes.push(...infraResult.nodes);
+  edges.push(...infraResult.edges);
+
+  // Git co-change detection
+  const coChangeEdges = detectCoChanges(repoPath, relativeFiles, now, { maxCommits: 200, minCoChanges: 3 });
+  edges.push(...coChangeEdges);
+
+  // Coverage ingestion
+  const coverageResult = ingestCoverage(repoPath, relativeFiles, nodes, now);
+  edges.push(...coverageResult.edges);
+
+  // External docs fetch (npm packages)
+  const externalNodes = nodes.filter(n => n.kind === 'External');
+  const docsResult = fetchExternalDocs(repoPath, externalNodes, now);
+  nodes.push(...docsResult.nodes);
+  edges.push(...docsResult.edges);
+  const repoDocs = findInRepoDocs(repoPath, relativeFiles, now);
+  nodes.push(...repoDocs.nodes);
+  edges.push(...repoDocs.edges);
+
+  // CODEOWNERS → suggested reviewers
+  const codeOwners = parseCodeOwners(repoPath);
+  // Code owners are stored for use by CLI suggested-reviewers command
+  // (they don't create graph nodes, just metadata)
+
   return finalizeGraph(nodes, edges, now);
 }
 

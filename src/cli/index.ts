@@ -1,7 +1,8 @@
 #!/usr/bin/env node
+import 'dotenv/config';
 import { Command } from 'commander';
 import { existsSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs';
-import { join, resolve, basename } from 'node:path';
+import { join, resolve, basename, dirname } from 'node:path';
 import { parseRepository } from '../parse/index.js';
 import {
   GraphStore, computeImpact, computeDiffImpact,
@@ -12,10 +13,13 @@ import {
   orchestrate, agentVerify, agentDebate, runSkill, listSkills, recordEvent,
 } from '../core/index.js';
 import { narrateImpact } from '../llm/narrate.js';
+import * as tui from './tui.js';
 import { isLLMConfigured } from '../llm/client.js';
 import { routeTask } from '../llm/router.js';
 import type { GraphNode, NodeKind } from '../core/types.js';
 import { quickPick } from './picker.js';
+import { generateContext, saveContext } from '../core/context.js';
+import { circuitStatus, resetCircuit } from '../core/circuit-breaker.js';
 
 const program = new Command();
 program.name('archmap').description(
@@ -48,83 +52,68 @@ function prettyNode(n: GraphNode) {
   const icon = KIND_ICON[n.kind] || '•';
   const loc = n.path ? `${n.path}${n.startLine ? ':' + n.startLine : ''}` : '';
   return `  ${icon} ${n.name}  ${n.kind}  ${loc}`;
-}
-function prettyImpact(result: any) {
+}function prettyImpact(result: any) {
   const lines: string[] = [];
   const counts = result.counts || {};
   const total = Object.values(counts).reduce((a: number, b: any) => a + (b as number), 0);
 
   // Severity banner
   const severity = result.severity || 'low';
-  const severityBanner: Record<string, string> = {
-    low: '🟢 LOW RISK',
-    medium: '🟡 MEDIUM RISK',
-    critical: '🔴 CRITICAL RISK',
-  };
-  lines.push(`\n${severityBanner[severity] || '🟢 LOW RISK'}`);
-  lines.push(`\n🎯 Impact: ${result.summary || `${total} things affected`}\n`);
+  lines.push(tui.severityBadge(severity));
+  lines.push(`
+  ${tui.c.brand('▸')} ${tui.c.node(result.summary || `${total} things affected`)}`);
+  lines.push('');
 
   // Grouped affected items by kind
   if (result.affectedByKind?.length) {
     for (const group of result.affectedByKind) {
       if (group.items.length === 0) continue;
-      lines.push(`   ${group.icon} ${group.label} (${group.items.length}):`);
+      lines.push(`  ${group.icon} ${tui.c.node(group.label)} ${tui.c.muted('(' + group.items.length + ')')}`);
       for (const item of group.items.slice(0, 8)) {
-        const loc = item.path ? `  ${item.path}${item.startLine ? ':' + item.startLine : ''}` : '';
-        lines.push(`      • ${item.name}${loc}`);
+        const loc = item.path ? ` ${tui.c.path(item.path)}${item.startLine ? tui.c.line(':' + item.startLine) : ''}` : '';
+        lines.push(`      ${tui.c.muted('•')} ${tui.c.node(item.name)}${loc}`);
       }
-      if (group.items.length > 8) lines.push(`      ... and ${group.items.length - 8} more`);
+      if (group.items.length > 8) lines.push(`      ${tui.c.muted('... and ' + (group.items.length - 8) + ' more')}`);
       lines.push('');
     }
   } else {
-    // Fallback to counts
     const order: NodeKind[] = ['Function', 'Method', 'Class', 'Interface', 'Table', 'API', 'External', 'Test'];
-    for (const k of order) if (counts[k]) lines.push(`   ${counts[k]}× ${k}`);
+    for (const k of order) if (counts[k]) lines.push(`  ${tui.c.muted(String(counts[k]) + '×')} ${tui.c.node(k)}`);
     lines.push('');
   }
 
-  // Why-paths (dependency chains)
+  // Why-paths
   if (result.paths?.length) {
-    lines.push('🔗 Why-paths (dependency chains):\n');
+    lines.push(tui.section('Why-paths', ''));
     for (const p of result.paths.slice(0, 5)) {
-      const steps = p.steps.map((s: any) => {
-        const from = s.from.split(':').pop() || s.from;
-        const to = s.to.split(':').pop() || s.to;
-        const edge = s.edgeType;
-        return `${from} ──${edge}──▸ ${to}`;
-      });
-      lines.push(`   ${steps.join('\n      ')}`);
-      // Show evidence for first step
-      if (p.steps[0]?.evidence) {
-        lines.push(`      📄 ${p.steps[0].evidence.file}:${p.steps[0].evidence.line}`);
-      }
+      lines.push(tui.whyPath(p.steps));
       lines.push('');
     }
   }
 
   // Risk chips
   if (result.riskChips?.length) {
-    lines.push('⚠️  Risk factors:\n');
-    const icons: Record<string, string> = { critical: '🔴', db_write: '💾', external: '🔗', untested: '🧪', conflict: '⚡', churn: '📈' };
-    for (const r of result.riskChips) lines.push(`   ${icons[r.kind] || '⚠️'} ${r.message}`);
+    lines.push(tui.section('Risk factors', ''));
+    for (const r of result.riskChips) lines.push(tui.riskChip(r.kind, r.message));
     lines.push('');
   }
 
   // Tests to run
   if (result.testsToRun?.length) {
-    lines.push(`🧪 Tests to run (${result.testsToRun.length}):\n`);
+    lines.push(tui.section(`Tests to run (${result.testsToRun.length})`, ''));
     for (const t of result.testsToRun.slice(0, 10)) {
       const name = t.split(':').pop() || t;
-      lines.push(`   • ${name}`);
+      lines.push(`  ${tui.c.muted('•')} ${tui.c.node(name)}`);
     }
-    lines.push('   → Run: npm test\n');
+    lines.push(`  ${tui.c.brand('→')} ${tui.c.muted('Run: npm test')}`);
+    lines.push('');
   }
 
   // Docs for externals
   if (result.docsForExternals?.length) {
-    lines.push(`📚 External docs available:\n`);
+    lines.push(tui.section('External docs', ''));
     for (const d of result.docsForExternals.slice(0, 5)) {
-      lines.push(`   • ${d.replace('ext:', '')}`);
+      lines.push(`  ${tui.c.muted('•')} ${tui.c.info(d.replace('ext:', ''))}`);
     }
     lines.push('');
   }
@@ -139,12 +128,16 @@ program.command('init [path]').description('Set up archmap for this project (run
   .action(async (repoPath: string = '.', opts: any) => {
     const abs = resolve(repoPath); const dir = getArchmapDir(abs); const t0 = Date.now();
     mkdirSync(dir, { recursive: true }); mkdirSync(join(dir, 'cache', 'docs'), { recursive: true }); mkdirSync(join(dir, 'public'), { recursive: true }); mkdirSync(join(dir, 'agent-runs'), { recursive: true });
-    console.log(`\n🏗️  Setting up archmap for: ${basename(abs)}\n`);
+    console.log(tui.banner(`Setting up archmap`, `Project: ${basename(abs)}`));
+    const s1 = tui.spinner('Parsing source files...').start();
     const store = new GraphStore(join(dir, 'index.db'));
     const { nodes, edges } = parseRepository(abs);
+    s1.succeed(`Parsed ${nodes.length} nodes, ${edges.length} edges`);
+    const s2 = tui.spinner('Building graph...').start();
     store.replaceGraph(nodes, edges);
     identifyFromGraph(store, abs);
     loadSeed(store, abs);
+    s2.succeed('Graph built');
     const gitignorePath = join(abs, '.gitignore');
     const entries = ['.archmap/index.db', '.archmap/vectors/', '.archmap/cache/', '.archmap/daemon.json', '.archmap/agent-runs/'];
     let gi = ''; if (existsSync(gitignorePath)) gi = readFileSync(gitignorePath, 'utf-8');
@@ -154,15 +147,13 @@ program.command('init [path]').description('Set up archmap for this project (run
     if (!existsSync(mcpPath)) writeFileSync(mcpPath, JSON.stringify({ mcpServers: { 'architecture-mapper': { command: 'npx', args: ['-y', 'archmap', 'mcp'], cwd: '${workspaceFolder}' } } }, null, 2) + '\n');
     const seedPath = join(dir, 'seed.yaml');
     if (!existsSync(seedPath)) writeFileSync(seedPath, `# archmap seed file\nproject:\n  name: ${basename(abs)}\nservices: []\nexternals: []\npins: []\nignore_paths: [node_modules/, dist/, build/, .git/]\ncritical: []\n`);
-    // Copy D3.js for local UI serving
     const d3Dest = join(dir, 'public', 'd3.min.js');
     if (!existsSync(d3Dest)) {
       try {
         const d3Source = join(new URL('../../', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1'), 'node_modules', 'd3', 'dist', 'd3.min.js');
         if (existsSync(d3Source)) writeFileSync(d3Dest, readFileSync(d3Source));
-      } catch { /* D3 not found in package — UI will use CDN fallback */ }
+      } catch { /* D3 not found */ }
     }
-    // Copy archmap-ui.js for local UI serving
     const uiJsDest = join(dir, 'public', 'archmap-ui.js');
     if (!existsSync(uiJsDest)) {
       try {
@@ -175,9 +166,12 @@ program.command('init [path]').description('Set up archmap for this project (run
     const s = ((Date.now() - t0) / 1000).toFixed(1);
     if (opts.json) output(envelope({ nodeCount: nc, edgeCount: ec }));
     else {
-      console.log(`✅ Done in ${s}s — ${nc} code pieces, ${ec} connections\n`);
-      console.log(`   Open the visualizer:  archmap ui`);
-      console.log(`   Or explore:  archmap summary | explain | impact | map\n`);
+      console.log(`\n${tui.c.success('✓')} Indexed in ${tui.c.node(s + 's')} — ${tui.c.node(String(nc))} components, ${tui.c.node(String(ec))} connections\n`);
+      console.log(tui.box(
+        `${tui.c.muted('Open the visualizer:')}  ${tui.c.node('archmap ui')}
+${tui.c.muted('Or explore:')}  ${tui.c.node('archmap summary')}  ${tui.c.node('archmap explain')}  ${tui.c.node('archmap impact')}`,
+        { title: 'Next steps', color: '#ca3e1c' }
+      ));
     }
   });
 
@@ -185,13 +179,23 @@ program.command('init [path]').description('Set up archmap for this project (run
 program.command('summary').description('See what\'s in your code').option('--json')
   .action((opts: any) => {
     const store = openStore('.'); const nodes = store.listNodes(undefined, 10000);
-    if (opts.json) { const c: Record<string, number> = {}; nodes.forEach(n => c[n.kind] = (c[n.kind] || 0) + 1); output(envelope({ nodeCount: nodes.length, edgeCount: store.countEdges(), counts: c })); store.close(); return; }
-    const c: Record<string, number> = {}; nodes.forEach(n => c[n.kind] = (c[n.kind] || 0) + 1);
-    console.log(`\n📊 Your codebase: ${nodes.length} pieces, ${store.countEdges()} connections\n`);
-    for (const [k, v] of Object.entries(c).sort((a, b) => b[1] - a[1])) if (k !== 'File') console.log(`   ${String(v).padStart(3)}  ${KIND_ICON[k] || '•'} ${k}`);
+    if (opts.json) { const cnt: Record<string, number> = {}; nodes.forEach(n => cnt[n.kind] = (cnt[n.kind] || 0) + 1); output(envelope({ nodeCount: nodes.length, edgeCount: store.countEdges(), counts: cnt })); store.close(); return; }
+    const cnt: Record<string, number> = {}; nodes.forEach(n => cnt[n.kind] = (cnt[n.kind] || 0) + 1);
+    console.log(tui.banner('Codebase Summary', `${nodes.length} components · ${store.countEdges()} relationships`));
+    const rows: string[][] = [];
+    for (const [k, v] of Object.entries(cnt).sort((a, b) => b[1] - a[1])) {
+      if (k === 'File') continue;
+      const icon = KIND_ICON[k] || '•';
+      rows.push([`  ${icon} ${tui.c.node(k)}`, tui.c.node(String(v))]);
+    }
+    console.log(tui.table(['Component', 'Count'], rows));
     const top = nodes.filter(n => ['Function', 'Method', 'Class'].includes(n.kind)).map(n => ({ n, c: store.getNeighbors(n.id).length })).sort((a, b) => b.c - a.c).slice(0, 5);
-    if (top.length) { console.log('\n🔥 Most connected:\n'); for (const { n, c } of top) console.log(`   ${String(c).padStart(3)} links  ${n.name}  (${n.path || n.id})`); }
-    console.log(''); store.close();
+    if (top.length) {
+      console.log(tui.section('Most connected', ''));
+      for (const { n, c } of top) console.log(`  ${tui.c.muted(String(c).padStart(3) + ' links')}  ${tui.c.node(n.name)}  ${tui.c.path(n.path || n.id)}`);
+      console.log('');
+    }
+    store.close();
   });
 
 // ─── explain ───────────────────────────────────────────────────────
@@ -202,12 +206,20 @@ program.command('explain [thing]').alias('symbol').description('What does this c
     const node = findNode(store, thing!);
     if (!node) { console.log(`\n❌ Couldn't find "${thing}"\n`); store.close(); return; }
     if (opts.json) { const callers = store.getInEdges(node.id).filter(e => e.type === 'CALLS'); const callees = store.getOutEdges(node.id).filter(e => e.type === 'CALLS'); output(envelope({ node, who_calls_it: callers.map(e => ({ id: e.from, evidence: e.evidence[0] })), what_it_calls: callees.map(e => ({ id: e.to, evidence: e.evidence[0] })) })); store.close(); return; }
-    console.log(`\n${prettyNode(node)}\n`);
+    console.log(tui.banner(node.name, `${node.kind} — ${node.path || node.id}`));
     const callers = store.getInEdges(node.id).filter(e => e.type === 'CALLS');
     const callees = store.getOutEdges(node.id).filter(e => e.type === 'CALLS');
-    if (callers.length) { console.log('   📥 Who calls this:'); for (const e of callers) { const c = store.getNode(e.from); console.log(`      ← ${c?.name || e.from}  (${e.evidence[0]?.file}:${e.evidence[0]?.line})`); } console.log(''); }
-    if (callees.length) { console.log('   📤 What it calls:'); for (const e of callees) { const c = store.getNode(e.to); console.log(`      → ${c?.name || e.to}  (${e.evidence[0]?.file}:${e.evidence[0]?.line})`); } console.log(''); }
-    if (!callers.length && !callees.length) console.log('   No connections found.\n');
+    if (callers.length) {
+      console.log(tui.section('Who calls this', ''));
+      for (const e of callers) { const cn = store.getNode(e.from); console.log(`  ${tui.c.muted('←')} ${tui.c.node(cn?.name || e.from)}  ${tui.c.path(e.evidence[0]?.file + ':' + e.evidence[0]?.line)}`); }
+      console.log('');
+    }
+    if (callees.length) {
+      console.log(tui.section('What it calls', ''));
+      for (const e of callees) { const cn = store.getNode(e.to); console.log(`  ${tui.c.muted('→')} ${tui.c.node(cn?.name || e.to)}  ${tui.c.path(e.evidence[0]?.file + ':' + e.evidence[0]?.line)}`); }
+      console.log('');
+    }
+    if (!callers.length && !callees.length) console.log(`  ${tui.c.muted('No connections found.')}`);
     store.close();
   });
 
@@ -404,6 +416,13 @@ program.command('serve').description('Start HTTP API server')
     const { startDaemon } = await import('../daemon/server.js'); await startDaemon(parseInt(opts.port || '3742', 10));
   });
 
+// ─── chat ────────────────────────────────────────────────────────
+program.command('chat').description('Interactive chat about your codebase (uses LLM)').action(async () => {
+    const { startChat } = await import('../llm/chat.js');
+    const store = openStore('.');
+    await startChat(store, resolve('.'));
+  });
+
 // ─── guide ─────────────────────────────────────────────────────────
 program.command('guide').description('Interactive walkthrough for first-timers').action(() => {
   console.log(`
@@ -432,7 +451,8 @@ STEP 4: Understand risk
    archmap tests             Which tests to run?
    archmap trace A B         Why are these connected?
 
-STEP 5: Agent workflows (LLM optional — set XAI_API_KEY)
+STEP 5: AI chat (LLM optional — set GEMINI_API_KEY in .env)
+   archmap chat              Interactive chat about your codebase
    archmap orchestrate "..." Bounded explore → impact → plan → verify
    archmap route "..."       Cheap vs strong vs deterministic
    archmap agent skill       List / run one skill
@@ -730,6 +750,135 @@ agentCmd.command('record').description('Record an incident/coverage/runtime even
     if (opts.json) output(envelope(result));
     else console.log(`\n📌 recorded ${opts.kind}${result.edge ? ' (edge upserted)' : ''}\n`);
     store.close();
+  });
+
+// ─── GitHub Action Generator ──────────────────────────────────────────────
+program
+  .command('github-action')
+  .description('Generate a GitHub Action workflow for archmap diff on PRs')
+  .option('--out <path>', 'Output path', '.github/workflows/archmap-diff.yml')
+  .action((opts: any = {}) => {
+    const dir = dirname(opts.out);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const workflow = [
+      'name: ArchMap Diff Impact',
+      '',
+      'on:',
+      '  pull_request:',
+      '    types: [opened, synchronize]',
+      '',
+      'permissions:',
+      '  contents: read',
+      '  pull-requests: write',
+      '  checks: write',
+      '',
+      'jobs:',
+      '  archmap-diff:',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      '      - uses: actions/checkout@v4',
+      '      - uses: actions/setup-node@v4',
+      '        with:',
+      '          node-version: 22',
+      '      - run: npm install -g archmap',
+      '      - run: archmap init',
+      '      - run: archmap sync',
+      '      - id: diff',
+      '        run: archmap diff ${{ github.event.pull_request.base.sha }} ${{ github.sha }} --json > /tmp/archmap-diff.json',
+      '      - name: Comment PR',
+      '        uses: actions/github-script@v7',
+      '        with:',
+      '          script: |',
+      '            const fs = require("fs");',
+      '            const diff = JSON.parse(fs.readFileSync("/tmp/archmap-diff.json", "utf8"));',
+      '            const d = diff.data || diff;',
+      '            const counts = d.impact?.counts || {};',
+      '            const risk = d.impact?.riskChips || [];',
+      '            const paths = (d.impact?.paths || []).slice(0, 5);',
+      '            let body = "## 🏗️ ArchMap Impact Analysis\n\n";',
+      '            body += "**Changed files:** " + (d.changedPaths || []).length + "\n\n";',
+      '            if (Object.keys(counts).length) {',
+      '              body += "### Affected Components\n";',
+      '              for (const [k, v] of Object.entries(counts)) body += "- " + k + ": " + v + "\n";',
+      '              body += "\n";',
+      '            }',
+      '            if (risk.length) {',
+      '              body += "### Risk\n";',
+      '              for (const r of risk) body += "- ⚠️ " + r.message + "\n";',
+      '              body += "\n";',
+      '            }',
+      '            if (paths.length) {',
+      '              body += "### Why-paths\n```mermaid\nflowchart LR\n";',
+      '              for (const p of paths) {',
+      '                for (let i = 0; i < p.steps.length - 1; i++) {',
+      '                  body += "  " + p.steps[i].from.split(":").pop() + " -->|" + p.steps[i].edgeType + "| " + p.steps[i+1].to.split(":").pop() + "\n";',
+      '                }',
+      '              }',
+      '              body += "```\n";',
+      '            }',
+      '            body += "\n---\n*Generated by archmap*";',
+      '            github.rest.issues.createComment({',
+      '              issue_number: context.issue.number,',
+      '              owner: context.repo.owner,',
+      '              repo: context.repo.repo,',
+      '              body',
+      '            });',
+    ].join('\n');
+    writeFileSync(opts.out, workflow, 'utf-8');
+    console.log('\n✅ GitHub Action written to ' + opts.out + '\n');
+    console.log('   Add to your repo and it will comment on PRs with impact analysis.\n');
+  });
+
+// ─── Context Export ───────────────────────────────────────────────────────────
+program
+  .command('context')
+  .description('Export canonical context.json from the graph')
+  .option('--focus <id>', 'Focus on a specific node')
+  .option('--json')
+  .action((opts: any = {}) => {
+    const store = openStore('.');
+    const ctx = generateContext(store, resolve('.'), undefined, opts.focus);
+    saveContext(resolve('.'), ctx);
+    if (opts.json) output(envelope(ctx));
+    else {
+      console.log('\n📋 Context exported to .archmap/context.json\n');
+      console.log('   Nodes: ' + ctx.summary.totalNodes + ', Edges: ' + ctx.summary.totalEdges);
+      console.log('   Services: ' + ctx.architecture.services.length);
+      console.log('   APIs: ' + ctx.architecture.apis.length);
+      console.log('   Tables: ' + ctx.architecture.tables.length);
+      console.log('   Externals: ' + ctx.architecture.externals.length);
+      console.log('   Tests: ' + ctx.architecture.tests.length);
+      console.log('   Infra: ' + ctx.architecture.infra.length);
+      if (ctx.insights.cycles) console.log('   Cycles: ' + ctx.insights.cycles);
+      console.log('');
+    }
+    store.close();
+  });
+
+// ─── Circuit Breaker ─────────────────────────────────────────────────────────
+program
+  .command('circuit')
+  .description('Show or reset the LLM circuit breaker status')
+  .option('--reset', 'Reset the circuit breaker')
+  .option('--json')
+  .action((opts: any = {}) => {
+    if (opts.reset) {
+      resetCircuit(resolve('.'));
+      console.log('\n✅ Circuit breaker reset\n');
+      return;
+    }
+    const status = circuitStatus(resolve('.'));
+    if (opts.json) output(envelope(status));
+    else {
+      console.log('\n⚡ Circuit Breaker Status\n');
+      console.log('   State: ' + (status.open ? '🔴 OPEN (LLM inference paused)' : '🟢 CLOSED'));
+      console.log('   Consecutive conflicts: ' + status.consecutiveConflicts);
+      console.log('   Proposals in window: ' + status.proposalsInWindow);
+      console.log('   Conflicts in window: ' + status.conflictsInWindow);
+      if (status.cooldownRemaining) console.log('   Cooldown: ' + status.cooldownRemaining + 's remaining');
+      if (status.lastConflictAt) console.log('   Last conflict: ' + status.lastConflictAt);
+      console.log('');
+    }
   });
 
 program.parse();

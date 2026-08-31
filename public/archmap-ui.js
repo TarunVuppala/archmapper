@@ -1,4 +1,12 @@
 
+    // Helper: use specific arrow marker if it exists, else fall back to default
+    const knownMarkers = new Set(['CONTAINS','CALLS','IMPORTS','EXPOSES','READS','WRITES','DEPENDS_ON','TESTS']);
+    function arrowMarker(type, highlight) {
+      const suffix = highlight ? '-highlight' : '';
+      if (knownMarkers.has(type)) return 'url(#arrow-' + type + suffix + ')';
+      return 'url(#arrow-default' + suffix + ')';
+    }
+
     // Complementary Base Palette for Directory-Tree Coloring (terracotta orange, deep purple, earthy beige, maroon #872341)
     const treePalette = [
       '#ca3e1c', // Burnt Terracotta Orange
@@ -356,7 +364,7 @@
       const linkEnter = linkSelection.enter().append("path")
         .attr("class", d => "link type-" + d.type)
         .attr("id", d => d.id)
-        .attr("marker-end", d => "url(#arrow-" + d.type + ")")
+        .attr("marker-end", d => arrowMarker(d.type, false))
         .on("click", (event, d) => {
           event.stopPropagation();
           selectNode(d.source.id);
@@ -367,7 +375,7 @@
         .attr("stroke-width", d => d.count ? Math.min(5, 1 + Math.log2(d.count + 1)) : 1.5)
         .attr("marker-end", d => {
           const isSelectedPath = selectedNode && (d.source.id === selectedNode.id || d.target.id === selectedNode.id);
-          return isSelectedPath ? "url(#arrow-" + d.type + "-highlight)" : "url(#arrow-" + d.type + ")";
+          return arrowMarker(d.type, isSelectedPath);
         });
 
       // Draw Nodes (Groups) — only the current projection, not the full hairball
@@ -528,7 +536,7 @@
         linksLayer.selectAll("path.link")
           .classed("highlight", false)
           .classed("fade", false)
-          .attr("marker-end", d => "url(#arrow-" + d.type + ")");
+          .attr("marker-end", d => arrowMarker(d.type, false));
         nodesLayer.selectAll("text.node-label")
           .classed("active", false)
           .style("opacity", d => d.isCluster || (selectedNode && d.id === selectedNode.id) ? 1 : 0);
@@ -577,7 +585,7 @@
         d3.select(this)
           .classed("highlight", matches)
           .classed("fade", !matches)
-          .attr("marker-end", d => matches ? "url(#arrow-" + d.type + "-highlight)" : "url(#arrow-" + d.type + ")");
+          .attr("marker-end", d => arrowMarker(d.type, matches));
       });
     }
 

@@ -14,6 +14,10 @@ import { computeInsights } from '../core/insights.js';
 import { planChange } from '../core/plan.js';
 import { resolveDocs } from '../core/docs.js';
 import { agentDebate, agentRun, agentVerify, recordEvent, runSkill } from '../core/agent.js';
+import { reconstructFlow } from '../core/flow.js';
+import { projectView } from '../core/views.js';
+import { generateContext, saveContext } from '../core/context.js';
+import { circuitStatus } from '../core/circuit-breaker.js';
 
 const SERVER_NAME = 'architecture-mapper';
 const SERVER_VERSION = '0.1.0';
@@ -233,6 +237,57 @@ const TOOLS = [
       },
     },
   },
+  {
+    name: 'flow',
+    description: 'Reconstruct an evidence-backed execution flow from a starting node (API endpoint, function, or service)',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        id: { type: 'string', description: 'Starting node ID or name' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'view',
+    description: 'Get a graph view projection (height, depth, call, api, db, flow)',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        mode: { type: 'string', enum: ['height', 'depth', 'call', 'api', 'db', 'flow'], default: 'height' },
+        focus: { type: 'string', description: 'Optional focus node ID' },
+      },
+    },
+  },
+  {
+    name: 'context',
+    description: 'Export canonical context.json snapshot from the graph',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        focus: { type: 'string', description: 'Optional focus node ID' },
+      },
+    },
+  },
+  {
+    name: 'circuit',
+    description: 'Get LLM circuit breaker status',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {},
+    },
+  },
+  {
+    name: 'open_graph',
+    description: 'Open a node in the IDE or visualizer (returns the node info for editor integration)',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        id: { type: 'string', description: 'Node ID to focus on' },
+      },
+      required: ['id'],
+    },
+  },
 ];
 
 // ─── Request Handling ─────────────────────────────────────────────────────────
@@ -415,6 +470,49 @@ async function handleToolCall(name: string, args: any, store: GraphStore): Promi
     case 'record_event': {
       const result = recordEvent(store, args, process.cwd());
       return { content: [{ type: 'text', text: JSON.stringify(envelope(result)) }] };
+    }
+
+    case 'flow': {
+      let node = store.getNode(args.id);
+      if (!node) {
+        const results = store.searchNodes(args.id, 1);
+        if (results.length > 0) node = results[0];
+      }
+      if (!node) return { content: [{ type: 'text', text: JSON.stringify(errorEnvelope(`Node not found: ${args.id}`)) }] };
+      const result = reconstructFlow(store, node.id);
+      return { content: [{ type: 'text', text: JSON.stringify(envelope(result)) }] };
+    }
+
+    case 'view': {
+      const mode = args.mode ?? 'height';
+      const view = projectView(store, mode, args.focus);
+      return { content: [{ type: 'text', text: JSON.stringify(envelope(view)) }] };
+    }
+
+    case 'context': {
+      const ctx = generateContext(store, process.cwd(), undefined, args.focus);
+      saveContext(process.cwd(), ctx);
+      return { content: [{ type: 'text', text: JSON.stringify(envelope(ctx)) }] };
+    }
+
+    case 'circuit': {
+      const status = circuitStatus(process.cwd());
+      return { content: [{ type: 'text', text: JSON.stringify(envelope(status)) }] };
+    }
+
+    case 'open_graph': {
+      let node = store.getNode(args.id);
+      if (!node) {
+        const results = store.searchNodes(args.id, 1);
+        if (results.length > 0) node = results[0];
+      }
+      if (!node) return { content: [{ type: 'text', text: JSON.stringify(errorEnvelope(`Node not found: ${args.id}`)) }] };
+      const neighbors = store.getNeighbors(node.id);
+      return { content: [{ type: 'text', text: JSON.stringify(envelope({
+        node,
+        neighbors,
+        openAt: node.path ? `${node.path}${node.startLine ? ':' + node.startLine : ''}` : undefined,
+      })) }] };
     }
 
     default:
