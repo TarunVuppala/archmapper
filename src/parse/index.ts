@@ -11,6 +11,7 @@ import { detectCoChanges } from './git-cochange.js';
 import { ingestCoverage } from './coverage.js';
 import { fetchExternalDocs, findInRepoDocs } from '../core/docs-fetch.js';
 import { parseCodeOwners } from './codeowners.js';
+import { parseWithTreeSitter } from './tree-sitter.js';
 
 export interface ParseResult {
   nodes: GraphNode[];
@@ -386,7 +387,7 @@ export function parseSingleFile(repoPath: string, relPath: string): ParseResult 
 
 // ─── Main Pipeline ─────────────────────────────────────────────────────────────
 
-export function parseRepository(repoPath: string): ParseResult {
+export async function parseRepository(repoPath: string): Promise<ParseResult> {
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
   const now = new Date().toISOString();
@@ -399,6 +400,9 @@ export function parseRepository(repoPath: string): ParseResult {
   const fileMetas: FileMeta[] = [];
 
   // ─── Pass 1: Parse definitions, instantiations, and imports for ALL files ───
+  // Try tree-sitter first, fall back to regex
+  let treeSitterStats = { treeSitter: 0, regex: 0 };
+
   for (const filePath of files) {
     const relPath = relative(repoPath, filePath).replace(/\\/g, '/');
     const ext = extname(filePath).toLowerCase();
@@ -420,6 +424,22 @@ export function parseRepository(repoPath: string): ParseResult {
       continue;
     }
 
+    // Try tree-sitter first
+    const tsResult = await parseWithTreeSitter(repoPath, relPath, content, now);
+    if (tsResult) {
+      // Tree-sitter succeeded — use its output
+      // Only add file node if not already added
+      if (!nodes.some(n => n.id === fileId(relPath))) {
+        nodes.push(...tsResult.nodes.filter(n => n.kind === 'File'));
+      }
+      // Add defs, imports, calls, routes from tree-sitter
+      nodes.push(...tsResult.nodes.filter(n => n.kind !== 'File'));
+      edges.push(...tsResult.edges);
+      treeSitterStats.treeSitter++;
+      continue;
+    }
+
+    // Fall back to regex parser
     const lines = content.split('\n');
     const fId = fileId(relPath);
 
@@ -451,6 +471,12 @@ export function parseRepository(repoPath: string): ParseResult {
     extractPass1(meta, relativeFiles, nodes, edges, now);
     extractTests(meta, nodes, edges, now);
     fileMetas.push(meta);
+    treeSitterStats.regex++;
+  }
+
+  // Log tree-sitter stats
+  if (treeSitterStats.treeSitter > 0) {
+    console.log(`   Tree-sitter: ${treeSitterStats.treeSitter} files, Regex: ${treeSitterStats.regex} files`);
   }
 
   // Map global symbol definitions across workspace for unique fallback

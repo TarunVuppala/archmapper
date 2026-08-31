@@ -29,3 +29,4 @@ export * from './types.js';
 export { generateContext, saveContext, loadContext, type ContextSnapshot } from './context.js';
 export { circuitStatus, resetCircuit, isCircuitOpen, recordProposal } from './circuit-breaker.js';
 export { fetchExternalDocs, findInRepoDocs } from './docs-fetch.js';
+export { discoverWorkspace, workspaceToGraph, workspaceSummary, type WorkspaceRepo, type WorkspaceEdge, type WorkspaceDiscovery } from './workspace.js';

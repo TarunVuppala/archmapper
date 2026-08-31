@@ -20,6 +20,7 @@ import type { GraphNode, NodeKind } from '../core/types.js';
 import { quickPick } from './picker.js';
 import { generateContext, saveContext } from '../core/context.js';
 import { circuitStatus, resetCircuit } from '../core/circuit-breaker.js';
+import { discoverWorkspace, workspaceToGraph, workspaceSummary } from '../core/workspace.js';
 
 const program = new Command();
 program.name('archmap').description(
@@ -131,7 +132,7 @@ program.command('init [path]').description('Set up archmap for this project (run
     console.log(tui.banner(`Setting up archmap`, `Project: ${basename(abs)}`));
     const s1 = tui.spinner('Parsing source files...').start();
     const store = new GraphStore(join(dir, 'index.db'));
-    const { nodes, edges } = parseRepository(abs);
+    const { nodes, edges } = await parseRepository(abs);
     s1.succeed(`Parsed ${nodes.length} nodes, ${edges.length} edges`);
     const s2 = tui.spinner('Building graph...').start();
     store.replaceGraph(nodes, edges);
@@ -382,9 +383,9 @@ program.command('pin').description('Connect two pieces of code')
 
 // ─── sync ──────────────────────────────────────────────────────────
 program.command('analyze [path]').alias('sync').description('Analyze / re-scan a repository into the graph').option('--json')
-  .action((repoPath: string = '.', opts: any) => {
+  .action(async (repoPath: string = '.', opts: any) => {
     const abs = resolve(repoPath); const store = openStore(abs);
-    const { nodes, edges } = parseRepository(abs);
+    const { nodes, edges } = await parseRepository(abs);
     store.replaceGraph(nodes, edges);
     identifyFromGraph(store, abs);
     loadSeed(store, abs);
@@ -591,11 +592,11 @@ program.command('status [path]').description('Project/analysis status').option('
   });
 
 program.command('add [path]').description('Import another repository into the current graph (does not wipe)')
-  .option('--json').action((repoPath: string = '.', opts: any = {}) => {
+  .option('--json').action(async (repoPath: string = '.', opts: any = {}) => {
     const extra = resolve(repoPath);
     if (!existsSync(extra)) { console.error('Path not found:', extra); process.exit(1); }
     const store = openStore('.');
-    const { nodes, edges } = parseRepository(extra);
+    const { nodes, edges } = await parseRepository(extra);
     store.transaction(() => { store.upsertNodes(nodes); store.upsertEdges(edges); });
     identifyFromGraph(store, extra);
     const payload = { added: extra, nodes: store.nodeCount, edges: store.edgeCount };
@@ -878,6 +879,26 @@ program
       if (status.cooldownRemaining) console.log('   Cooldown: ' + status.cooldownRemaining + 's remaining');
       if (status.lastConflictAt) console.log('   Last conflict: ' + status.lastConflictAt);
       console.log('');
+    }
+  });
+
+// ─── Workspace Discovery ────────────────────────────────────────────────
+program
+  .command('workspace [path]')
+  .description('Discover repos, monorepo packages, and cross-repo dependencies')
+  .option('--json')
+  .option('--depth <n>', 'Max search depth', '4')
+  .action(async (repoPath: string = '.', opts: any = {}) => {
+    const abs = resolve(repoPath);
+    const s1 = tui.spinner('Discovering workspace...').start();
+    const discovery = discoverWorkspace(abs, parseInt(opts.depth));
+    s1.succeed(`Found ${discovery.repos.length} repos${discovery.monorepo ? ', monorepo: ' + discovery.monorepo.type : ''}`);
+    
+    if (opts.json) {
+      const { nodes, edges } = workspaceToGraph(discovery, new Date().toISOString());
+      output(envelope({ discovery, nodes, edges }));
+    } else {
+      console.log(workspaceSummary(discovery));
     }
   });
 
