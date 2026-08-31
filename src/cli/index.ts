@@ -49,22 +49,82 @@ function prettyImpact(result: any) {
   const lines: string[] = [];
   const counts = result.counts || {};
   const total = Object.values(counts).reduce((a: number, b: any) => a + (b as number), 0);
-  lines.push(`\n📊 Impact: ${total} things affected\n`);
-  const order: NodeKind[] = ['Function', 'Method', 'Class', 'Interface', 'Table', 'API', 'External', 'Test'];
-  for (const k of order) if (counts[k]) lines.push(`   ${counts[k]}× ${k}`);
+
+  // Severity banner
+  const severity = result.severity || 'low';
+  const severityBanner: Record<string, string> = {
+    low: '🟢 LOW RISK',
+    medium: '🟡 MEDIUM RISK',
+    critical: '🔴 CRITICAL RISK',
+  };
+  lines.push(`\n${severityBanner[severity] || '🟢 LOW RISK'}`);
+  lines.push(`\n🎯 Impact: ${result.summary || `${total} things affected`}\n`);
+
+  // Grouped affected items by kind
+  if (result.affectedByKind?.length) {
+    for (const group of result.affectedByKind) {
+      if (group.items.length === 0) continue;
+      lines.push(`   ${group.icon} ${group.label} (${group.items.length}):`);
+      for (const item of group.items.slice(0, 8)) {
+        const loc = item.path ? `  ${item.path}${item.startLine ? ':' + item.startLine : ''}` : '';
+        lines.push(`      • ${item.name}${loc}`);
+      }
+      if (group.items.length > 8) lines.push(`      ... and ${group.items.length - 8} more`);
+      lines.push('');
+    }
+  } else {
+    // Fallback to counts
+    const order: NodeKind[] = ['Function', 'Method', 'Class', 'Interface', 'Table', 'API', 'External', 'Test'];
+    for (const k of order) if (counts[k]) lines.push(`   ${counts[k]}× ${k}`);
+    lines.push('');
+  }
+
+  // Why-paths (dependency chains)
   if (result.paths?.length) {
-    lines.push('\n🔗 Paths:\n');
+    lines.push('🔗 Why-paths (dependency chains):\n');
     for (const p of result.paths.slice(0, 5)) {
-      for (const s of p.steps) lines.push(`    ${(s.from.split(':').pop() || s.from)} ──${s.edgeType}──▸ ${(s.to.split(':').pop() || s.to)}`);
+      const steps = p.steps.map((s: any) => {
+        const from = s.from.split(':').pop() || s.from;
+        const to = s.to.split(':').pop() || s.to;
+        const edge = s.edgeType;
+        return `${from} ──${edge}──▸ ${to}`;
+      });
+      lines.push(`   ${steps.join('\n      ')}`);
+      // Show evidence for first step
+      if (p.steps[0]?.evidence) {
+        lines.push(`      📄 ${p.steps[0].evidence.file}:${p.steps[0].evidence.line}`);
+      }
       lines.push('');
     }
   }
+
+  // Risk chips
   if (result.riskChips?.length) {
-    lines.push('⚠️  Risks:\n');
-    const icons: Record<string, string> = { critical: '🔴', db_write: '💾', external: '🔗', untested: '🧪' };
+    lines.push('⚠️  Risk factors:\n');
+    const icons: Record<string, string> = { critical: '🔴', db_write: '💾', external: '🔗', untested: '🧪', conflict: '⚡', churn: '📈' };
     for (const r of result.riskChips) lines.push(`   ${icons[r.kind] || '⚠️'} ${r.message}`);
     lines.push('');
   }
+
+  // Tests to run
+  if (result.testsToRun?.length) {
+    lines.push(`🧪 Tests to run (${result.testsToRun.length}):\n`);
+    for (const t of result.testsToRun.slice(0, 10)) {
+      const name = t.split(':').pop() || t;
+      lines.push(`   • ${name}`);
+    }
+    lines.push('   → Run: npm test\n');
+  }
+
+  // Docs for externals
+  if (result.docsForExternals?.length) {
+    lines.push(`📚 External docs available:\n`);
+    for (const d of result.docsForExternals.slice(0, 5)) {
+      lines.push(`   • ${d.replace('ext:', '')}`);
+    }
+    lines.push('');
+  }
+
   return lines.join('\n');
 }
 function output(result: unknown) { console.log(JSON.stringify(result, null, 2)); }
@@ -74,7 +134,7 @@ program.command('init [path]').description('Set up archmap for this project (run
   .option('--json', 'Output as JSON')
   .action(async (repoPath: string = '.', opts: any) => {
     const abs = resolve(repoPath); const dir = getArchmapDir(abs); const t0 = Date.now();
-    mkdirSync(dir, { recursive: true }); mkdirSync(join(dir, 'cache', 'docs'), { recursive: true });
+    mkdirSync(dir, { recursive: true }); mkdirSync(join(dir, 'cache', 'docs'), { recursive: true }); mkdirSync(join(dir, 'public'), { recursive: true });
     console.log(`\n🏗️  Setting up archmap for: ${basename(abs)}\n`);
     const store = new GraphStore(join(dir, 'index.db'));
     const { nodes, edges } = parseRepository(abs);
@@ -90,6 +150,22 @@ program.command('init [path]').description('Set up archmap for this project (run
     if (!existsSync(mcpPath)) writeFileSync(mcpPath, JSON.stringify({ mcpServers: { 'architecture-mapper': { command: 'npx', args: ['-y', 'archmap', 'mcp'], cwd: '${workspaceFolder}' } } }, null, 2) + '\n');
     const seedPath = join(dir, 'seed.yaml');
     if (!existsSync(seedPath)) writeFileSync(seedPath, `# archmap seed file\nproject:\n  name: ${basename(abs)}\nservices: []\nexternals: []\npins: []\nignore_paths: [node_modules/, dist/, build/, .git/]\ncritical: []\n`);
+    // Copy D3.js for local UI serving
+    const d3Dest = join(dir, 'public', 'd3.min.js');
+    if (!existsSync(d3Dest)) {
+      try {
+        const d3Source = join(new URL('../../', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1'), 'node_modules', 'd3', 'dist', 'd3.min.js');
+        if (existsSync(d3Source)) writeFileSync(d3Dest, readFileSync(d3Source));
+      } catch { /* D3 not found in package — UI will use CDN fallback */ }
+    }
+    // Copy archmap-ui.js for local UI serving
+    const uiJsDest = join(dir, 'public', 'archmap-ui.js');
+    if (!existsSync(uiJsDest)) {
+      try {
+        const uiJsSource = join(new URL('../../', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1'), 'public', 'archmap-ui.js');
+        if (existsSync(uiJsSource)) writeFileSync(uiJsDest, readFileSync(uiJsSource));
+      } catch { /* archmap-ui.js not found */ }
+    }
     const nc = store.nodeCount, ec = store.edgeCount; store.close();
     const j = new Journal(dir); j.append('init', { path: abs, nodeCount: nc, edgeCount: ec });
     const s = ((Date.now() - t0) / 1000).toFixed(1);
@@ -407,20 +483,27 @@ program.command('plan_change [thing]').description('Bounded files you are allowe
     store.close();
   });
 
-program.command('diff [base] [head]').description('Impact of a git diff')
-  .option('--json').action((base = 'main', head = 'HEAD', opts: any = {}) => {
+program.command('diff [base] [head]').description('Impact of a git diff (working tree if no refs given)')
+  .option('--json')
+  .option('--staged', 'Compare staged (index) changes to HEAD')
+  .option('--working', 'Compare the working tree (unstaged + untracked) to HEAD')
+  .action((base?: string, head?: string, opts: any = {}) => {
     const store = openStore('.');
-    const result = computeDiffImpact(store, base, head, undefined, '.');
+    const mode = opts.staged ? 'staged' : (opts.working || !base) ? 'working' : 'range';
+    const result = computeDiffImpact(store, { base, head, mode, repoPath: resolve('.') });
     if (opts.json) output(envelope(result));
     else {
-      console.log(`\n📑 Diff impact ${base}...${head}`);
+      const label = mode === 'working' ? 'working tree vs HEAD' : mode === 'staged' ? 'staged vs HEAD' : `${result.base}...${result.head}`;
+      console.log(`\n📑 Diff impact (${label})`);
+      if (result.gitError) console.log(`   ⚠️  ${result.gitError}`);
+      if (result.changedPaths.length) console.log(`   ${result.changedPaths.length} changed file(s)`);
       if (result.changedSymbols.length) {
         console.log(`   ${result.changedSymbols.length} changed symbols`);
         for (const s of result.changedSymbols.slice(0, 12)) {
           console.log(`      • ${s.change}  ${s.nodeId}`);
         }
       } else {
-        console.log('   No changed symbols resolved from git diff (graph still current).');
+        console.log('   No changed symbols resolved from git diff.');
       }
       console.log(prettyImpact(result.impact));
     }

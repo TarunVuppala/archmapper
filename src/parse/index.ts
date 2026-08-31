@@ -432,6 +432,49 @@ export function parseRepository(repoPath: string): ParseResult {
   return finalizeGraph(nodes, edges, now);
 }
 
+/** Parse a single file's content into nodes/edges (definitions only — no call-graph pass). */
+export function parseFileContent(relPath: string, content: string): ParseResult {
+  const nodes: GraphNode[] = [];
+  const edges: GraphEdge[] = [];
+  const now = new Date().toISOString();
+  const posix = relPath.replace(/\\/g, '/');
+  const ext = extname(posix).toLowerCase();
+  const lang = LANGUAGE_MAP[ext];
+
+  if (lang === 'markdown') {
+    extractDoc(posix, content, nodes, edges, now);
+    return { nodes, edges };
+  }
+  if (!lang && ext !== '.dockerfile' && ext !== '') return { nodes, edges };
+
+  const lines = content.split(/\r?\n/);
+  const fId = fileId(posix);
+  nodes.push({
+    id: fId,
+    kind: 'File',
+    name: posix.split('/').pop() || posix,
+    path: posix,
+    lang: lang || 'unknown',
+    updated_at: now,
+  });
+  const meta: FileMeta = {
+    relPath: posix,
+    lang: lang || 'unknown',
+    fId,
+    content,
+    lines,
+    definitions: new Map(),
+    imports: new Map(),
+    wildcardImports: [],
+    instantiations: new Map(),
+    funcDefs: [],
+    skip: maskEmbeddedLines(lines),
+  };
+  extractPass1(meta, [posix], nodes, edges, now);
+  extractTests(meta, nodes, edges, now);
+  return { nodes, edges };
+}
+
 // ─── Pass 1 Extraction Logic ───────────────────────────────────────────────────
 
 function extractPass1(
@@ -668,6 +711,180 @@ function extractPass1(
             evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
             sources: ['parser'], confidence: 1.0, conflict: false, updated_at: now,
           });
+        }
+      }
+    }
+
+    // Go Imports: import "pkg" or import ( "pkg1" "pkg2" )
+    if (lang === 'go') {
+      const goImport = line.match(/^import\s+"([^"]+)"/);
+      if (goImport) {
+        const mod = goImport[1];
+        const extId = `ext:${mod}`;
+        if (!edges.some(e => e.id === edgeId(fId, extId, 'IMPORTS'))) {
+          edges.push({ id: edgeId(fId, extId, 'IMPORTS'), type: 'IMPORTS', from: fId, to: extId,
+            evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+            sources: ['parser'], confidence: 1.0, conflict: false, updated_at: now });
+        }
+        continue;
+      }
+      const goImportBlock = line.match(/^"([^"]+)"/);
+      if (goImportBlock && lines[i - 1]?.trim().startsWith('import')) {
+        const mod = goImportBlock[1];
+        const extId = `ext:${mod}`;
+        if (!edges.some(e => e.id === edgeId(fId, extId, 'IMPORTS'))) {
+          edges.push({ id: edgeId(fId, extId, 'IMPORTS'), type: 'IMPORTS', from: fId, to: extId,
+            evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+            sources: ['parser'], confidence: 1.0, conflict: false, updated_at: now });
+        }
+      }
+    }
+
+    // Rust Imports: use crate::module; use std::collections::HashMap;
+    if (lang === 'rust') {
+      const rustUse = line.match(/^use\s+([a-zA-Z0-9_:]+);/);
+      if (rustUse) {
+        const mod = rustUse[1];
+        const parts = mod.split('::');
+        const extId = parts[0] === 'crate' || parts[0] === 'super' || parts[0] === 'self'
+          ? `file:${relPath.replace(/[^/]+$/, parts.slice(1).join('/') + '.rs')}`
+          : `ext:${parts[0]}`;
+        if (!edges.some(e => e.id === edgeId(fId, extId, 'IMPORTS'))) {
+          edges.push({ id: edgeId(fId, extId, 'IMPORTS'), type: 'IMPORTS', from: fId, to: extId,
+            evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+            sources: ['parser'], confidence: 0.9, conflict: false, updated_at: now });
+        }
+        continue;
+      }
+      const rustMod = line.match(/^mod\s+(\w+)/);
+      if (rustMod) {
+        const modName = rustMod[1];
+        const targetPath = relPath.replace(/[^/]+$/, modName + '.rs');
+        const targetFileId = fileId(targetPath);
+        if (!edges.some(e => e.id === edgeId(fId, targetFileId, 'IMPORTS'))) {
+          edges.push({ id: edgeId(fId, targetFileId, 'IMPORTS'), type: 'IMPORTS', from: fId, to: targetFileId,
+            evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+            sources: ['parser'], confidence: 0.9, conflict: false, updated_at: now });
+        }
+      }
+    }
+
+            // Ruby Imports: require, require_relative, autoload
+    if (lang === 'ruby') {
+      const rubyReq = line.match(/^\s*(?:require_relative|require|autoload)\s*['"'"'"](\w+)['"'"'"]/);
+      if (rubyReq) {
+        const mod = rubyReq[1];
+        const extId = `ext:${mod}`;
+        if (!edges.some(e => e.id === edgeId(fId, extId, 'IMPORTS'))) {
+          edges.push({ id: edgeId(fId, extId, 'IMPORTS'), type: 'IMPORTS', from: fId, to: extId,
+            evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+            sources: ['parser'], confidence: 0.9, conflict: false, updated_at: now });
+        }
+      }
+    }
+
+    // PHP Imports: use, include, require
+    if (lang === 'php') {
+      const phpUse = line.match(/^use\s+([A-Za-z0-9_\\]+);/);
+      if (phpUse) {
+        const mod = phpUse[1].replace(/\\/g, '/').toLowerCase();
+        const extId = `ext:${mod}`;
+        if (!edges.some(e => e.id === edgeId(fId, extId, 'IMPORTS'))) {
+          edges.push({ id: edgeId(fId, extId, 'IMPORTS'), type: 'IMPORTS', from: fId, to: extId,
+            evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+            sources: ['parser'], confidence: 0.9, conflict: false, updated_at: now });
+        }
+        continue;
+      }
+      const phpInc = line.match(/^\s*(?:include|require|include_once|require_once)\s*['"'"'"](\w+)['"'"'"]/);
+      if (phpInc) {
+        const mod = phpInc[1];
+        const extId = `ext:${mod}`;
+        if (!edges.some(e => e.id === edgeId(fId, extId, 'IMPORTS'))) {
+          edges.push({ id: edgeId(fId, extId, 'IMPORTS'), type: 'IMPORTS', from: fId, to: extId,
+            evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+            sources: ['parser'], confidence: 0.9, conflict: false, updated_at: now });
+        }
+      }
+    }
+
+    // C# Imports: using, global using
+    if (lang === 'csharp') {
+      const csUsing = line.match(/^using\s+([A-Za-z0-9_.]+);/);
+      if (csUsing) {
+        const mod = csUsing[1];
+        const extId = `ext:${mod}`;
+        if (!edges.some(e => e.id === edgeId(fId, extId, 'IMPORTS'))) {
+          edges.push({ id: edgeId(fId, extId, 'IMPORTS'), type: 'IMPORTS', from: fId, to: extId,
+            evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+            sources: ['parser'], confidence: 0.9, conflict: false, updated_at: now });
+        }
+      }
+    }
+
+    // Swift Imports: import Module
+    if (lang === 'swift') {
+      const swiftImport = line.match(/^import\s+(\w+)/);
+      if (swiftImport) {
+        const mod = swiftImport[1];
+        const stdlib = ['Foundation', 'UIKit', 'SwiftUI', 'Combine', 'CoreData', 'CoreGraphics', 'Dispatch', 'XCTest'];
+        if (!stdlib.includes(mod)) {
+          const extId = `ext:${mod}`;
+          if (!edges.some(e => e.id === edgeId(fId, extId, 'IMPORTS'))) {
+            edges.push({ id: edgeId(fId, extId, 'IMPORTS'), type: 'IMPORTS', from: fId, to: extId,
+              evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+              sources: ['parser'], confidence: 0.9, conflict: false, updated_at: now });
+          }
+        }
+      }
+    }
+
+    // Kotlin Imports: import, package
+    if (lang === 'kotlin') {
+      const ktImport = line.match(/^import\s+([a-zA-Z0-9_.]+)/);
+      if (ktImport) {
+        const mod = ktImport[1];
+        const pkg = mod.split('.').slice(0, -1).join('.');
+        if (!pkg.startsWith('kotlin') && !pkg.startsWith('java.lang')) {
+          const extId = `ext:${pkg}`;
+          if (!edges.some(e => e.id === edgeId(fId, extId, 'IMPORTS'))) {
+            edges.push({ id: edgeId(fId, extId, 'IMPORTS'), type: 'IMPORTS', from: fId, to: extId,
+              evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+              sources: ['parser'], confidence: 0.9, conflict: false, updated_at: now });
+          }
+        }
+      }
+    }
+
+    // Scala Imports: import
+    if (lang === 'scala') {
+      const scalaImport = line.match(/^import\s+([a-zA-Z0-9_.]+)/);
+      if (scalaImport) {
+        const mod = scalaImport[1];
+        if (!mod.startsWith('scala.') && !mod.startsWith('java.')) {
+          const extId = `ext:${mod}`;
+          if (!edges.some(e => e.id === edgeId(fId, extId, 'IMPORTS'))) {
+            edges.push({ id: edgeId(fId, extId, 'IMPORTS'), type: 'IMPORTS', from: fId, to: extId,
+              evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+              sources: ['parser'], confidence: 0.9, conflict: false, updated_at: now });
+          }
+        }
+      }
+    }
+
+    // C/C++ Includes: #include <header> or #include "header"
+    if (lang === 'c' || lang === 'cpp') {
+      const cppInclude = line.match(/^#\s*include\s*[<"]([^>"]+)[>"]/);
+      if (cppInclude) {
+        const header = cppInclude[1];
+        const isStd = /^(stdio|stdlib|string|math|assert|errno|limits|float|ctype|signal|stdarg|stddef|time|setjmp|stdint|inttypes|stdbool|complex|fenv|locale|tgmath|wchar|wctype)/.test(header);
+        if (!isStd) {
+          const extId = `ext:${header}`;
+          if (!edges.some(e => e.id === edgeId(fId, extId, 'IMPORTS'))) {
+            edges.push({ id: edgeId(fId, extId, 'IMPORTS'), type: 'IMPORTS', from: fId, to: extId,
+              evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+              sources: ['parser'], confidence: 0.9, conflict: false, updated_at: now });
+          }
         }
       }
     }
@@ -1234,7 +1451,7 @@ function extractConfig(
   }
 }
 
-// ─── Generic extraction ────────────────────────────────────────────────────────
+// ─── Generic extraction (all languages) ───────────────────────────────────────
 
 function extractGeneric(
   content: string,
@@ -1246,25 +1463,242 @@ function extractGeneric(
   now: string
 ): void {
   const fId = fileId(relPath);
+  const isMethod = (line: string): boolean => {
+    const indent = line.search(/\S/);
+    return indent >= 2; // indented = likely a method
+  };
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const fnMatch = line.match(
-      /(?:^|\s)(?:func|function|fn|def|sub|proc)\s+(\w+)/
-    );
+    const trimmed = line.trim();
+
+    // ── Go: func Name() / func (r Receiver) Name() / type X struct/interface ──
+    if (lang === 'go') {
+      const goFunc = line.match(/^func\s+(?:\((?:[^)]*)\)\s+)?(\w+)\s*\(/);
+      if (goFunc) {
+        const name = goFunc[1];
+        const id = functionId(relPath, name);
+        nodes.push({ id, kind: 'Function', name, path: relPath, lang, startLine: i + 1, updated_at: now });
+        edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id,
+          evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+          sources: ['parser'], confidence: 0.8, conflict: false, updated_at: now });
+        continue;
+      }
+      const goType = line.match(/^type\s+(\w+)\s+(struct|interface)/);
+      if (goType) {
+        const name = goType[1];
+        const kind = goType[2] === 'interface' ? 'Interface' : 'Class';
+        const id = kind === 'Interface' ? interfaceId(relPath, name) : classId(relPath, name);
+        nodes.push({ id, kind: kind as any, name, path: relPath, lang, startLine: i + 1, updated_at: now });
+        edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id,
+          evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+          sources: ['parser'], confidence: 0.8, conflict: false, updated_at: now });
+        continue;
+      }
+    }
+
+    // ── Rust: fn Name() / pub fn Name() / struct/enum/trait/impl ──
+    if (lang === 'rust') {
+      const rustFn = line.match(/^(?:pub\s+)?(?:async\s+)?fn\s+(\w+)/);
+      if (rustFn) {
+        const name = rustFn[1];
+        const id = functionId(relPath, name);
+        nodes.push({ id, kind: 'Function', name, path: relPath, lang, startLine: i + 1, updated_at: now });
+        edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id,
+          evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+          sources: ['parser'], confidence: 0.8, conflict: false, updated_at: now });
+        continue;
+      }
+      const rustType = line.match(/^(?:pub\s+)?(?:enum|struct)\s+(\w+)/);
+      if (rustType) {
+        const name = rustType[1];
+        const id = classId(relPath, name);
+        nodes.push({ id, kind: 'Class', name, path: relPath, lang, startLine: i + 1, updated_at: now });
+        edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id,
+          evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+          sources: ['parser'], confidence: 0.8, conflict: false, updated_at: now });
+        continue;
+      }
+      const rustTrait = line.match(/^(?:pub\s+)?trait\s+(\w+)/);
+      if (rustTrait) {
+        const name = rustTrait[1];
+        const id = interfaceId(relPath, name);
+        nodes.push({ id, kind: 'Interface', name, path: relPath, lang, startLine: i + 1, updated_at: now });
+        edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id,
+          evidence: [{ file: relPath, line: i + 1, snippet: line.slice(0, 120) }],
+          sources: ['parser'], confidence: 0.8, conflict: false, updated_at: now });
+        continue;
+      }
+      const rustImpl = line.match(/^impl(?:<[^>]+>)?\s+(\w+)/);
+      if (rustImpl) {
+        const className = rustImpl[1];
+        // Parse methods inside impl block
+        let depth = 0;
+        for (let j = i; j < lines.length; j++) {
+          for (const ch of lines[j]) {
+            if (ch === '{') depth++;
+            if (ch === '}') { depth--; if (depth === 0) break; }
+          }
+          if (depth === 0 && j > i) break;
+          if (depth > 0) {
+            const implMethod = lines[j].match(/^(?:pub\s+)?(?:async\s+)?fn\s+(\w+)/);
+            if (implMethod) {
+              const name = implMethod[1];
+              const id = functionId(relPath, name);
+              nodes.push({ id, kind: 'Method', name, path: relPath, lang, startLine: j + 1, updated_at: now });
+              edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id,
+                evidence: [{ file: relPath, line: j + 1, snippet: lines[j].slice(0, 120) }],
+                sources: ['parser'], confidence: 0.8, conflict: false, updated_at: now });
+            }
+          }
+        }
+      }
+    }
+
+    // ── Ruby: def Name / class Name / module Name ──
+    if (lang === 'ruby') {
+      const rubyDef = line.match(/^\s*def\s+(?:self\.)?(\w+[?!]?)/);
+      if (rubyDef) {
+        const name = rubyDef[1];
+        const kind = isMethod(line) ? 'Method' : 'Function';
+        const id = functionId(relPath, name);
+        nodes.push({ id, kind, name, path: relPath, lang, startLine: i + 1, updated_at: now });
+        edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id,
+          evidence: [{ file: relPath, line: i + 1, snippet: line.trim().slice(0, 120) }],
+          sources: ['parser'], confidence: 0.8, conflict: false, updated_at: now });
+        continue;
+      }
+      const rubyClass = line.match(/^(?:class|module)\s+(\w+)/);
+      if (rubyClass) {
+        const name = rubyClass[1];
+        const kind = rubyClass[0].startsWith('module') ? 'Interface' : 'Class';
+        const id = kind === 'Interface' ? interfaceId(relPath, name) : classId(relPath, name);
+        nodes.push({ id, kind: kind as any, name, path: relPath, lang, startLine: i + 1, updated_at: now });
+        edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id,
+          evidence: [{ file: relPath, line: i + 1, snippet: line.trim().slice(0, 120) }],
+          sources: ['parser'], confidence: 0.8, conflict: false, updated_at: now });
+        continue;
+      }
+    }
+
+    // ── PHP: function Name() / class Name / interface Name ──
+    if (lang === 'php') {
+      const phpFunc = line.match(/^(?:public|private|protected|static)?\s*(?:function)\s+(\w+)/);
+      if (phpFunc) {
+        const name = phpFunc[1];
+        const kind = isMethod(line) ? 'Method' : 'Function';
+        const id = functionId(relPath, name);
+        nodes.push({ id, kind, name, path: relPath, lang, startLine: i + 1, updated_at: now });
+        edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id,
+          evidence: [{ file: relPath, line: i + 1, snippet: line.trim().slice(0, 120) }],
+          sources: ['parser'], confidence: 0.8, conflict: false, updated_at: now });
+        continue;
+      }
+      const phpClass = line.match(/^(?:abstract\s+)?class\s+(\w+)/);
+      if (phpClass) {
+        const name = phpClass[1];
+        const id = classId(relPath, name);
+        nodes.push({ id, kind: 'Class', name, path: relPath, lang, startLine: i + 1, updated_at: now });
+        edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id,
+          evidence: [{ file: relPath, line: i + 1, snippet: line.trim().slice(0, 120) }],
+          sources: ['parser'], confidence: 0.8, conflict: false, updated_at: now });
+        continue;
+      }
+      const phpIface = line.match(/^interface\s+(\w+)/);
+      if (phpIface) {
+        const name = phpIface[1];
+        const id = interfaceId(relPath, name);
+        nodes.push({ id, kind: 'Interface', name, path: relPath, lang, startLine: i + 1, updated_at: now });
+        edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id,
+          evidence: [{ file: relPath, line: i + 1, snippet: line.trim().slice(0, 120) }],
+          sources: ['parser'], confidence: 0.8, conflict: false, updated_at: now });
+        continue;
+      }
+    }
+
+    // ── C#: method/class/interface/struct ──
+    if (lang === 'csharp') {
+      const csMethod = line.match(/^(?:public|private|protected|internal|static|async|virtual|override|abstract)?\s*(?:Task<?|void|int|string|bool|object|\w+)\s+(\w+)\s*\(/);
+      if (csMethod && !['class', 'interface', 'struct', 'enum', 'if', 'for', 'while', 'switch', 'return', 'new', 'using', 'namespace'].includes(csMethod[1])) {
+        const name = csMethod[1];
+        const kind = isMethod(line) ? 'Method' : 'Function';
+        const id = functionId(relPath, name);
+        nodes.push({ id, kind, name, path: relPath, lang, startLine: i + 1, updated_at: now });
+        edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id,
+          evidence: [{ file: relPath, line: i + 1, snippet: line.trim().slice(0, 120) }],
+          sources: ['parser'], confidence: 0.7, conflict: false, updated_at: now });
+        continue;
+      }
+      const csClass = line.match(/^(?:public|private|internal)?\s*(?:partial\s+)?(?:abstract\s+)?class\s+(\w+)/);
+      if (csClass) { const name = csClass[1]; const id = classId(relPath, name); nodes.push({ id, kind: 'Class', name, path: relPath, lang, startLine: i + 1, updated_at: now }); edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id, evidence: [{ file: relPath, line: i + 1, snippet: line.trim().slice(0, 120) }], sources: ['parser'], confidence: 0.8, conflict: false, updated_at: now }); continue; }
+      const csIface = line.match(/^(?:public|private|internal)?\s*interface\s+(\w+)/);
+      if (csIface) { const name = csIface[1]; const id = interfaceId(relPath, name); nodes.push({ id, kind: 'Interface', name, path: relPath, lang, startLine: i + 1, updated_at: now }); edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id, evidence: [{ file: relPath, line: i + 1, snippet: line.trim().slice(0, 120) }], sources: ['parser'], confidence: 0.8, conflict: false, updated_at: now }); continue; }
+    }
+
+    // ── Swift: func Name() / class Name / protocol Name / struct Name ──
+    if (lang === 'swift') {
+      const swiftFunc = line.match(/^(?:public|private|internal|static)?\s*(?:func|mutating func)\s+(\w+)/);
+      if (swiftFunc) { const name = swiftFunc[1]; const id = functionId(relPath, name); nodes.push({ id, kind: 'Function', name, path: relPath, lang, startLine: i + 1, updated_at: now }); edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id, evidence: [{ file: relPath, line: i + 1, snippet: line.trim().slice(0, 120) }], sources: ['parser'], confidence: 0.8, conflict: false, updated_at: now }); continue; }
+      const swiftClass = line.match(/^(?:public|private|internal)?\s*(?:final\s+)?class\s+(\w+)/);
+      if (swiftClass) { const name = swiftClass[1]; const id = classId(relPath, name); nodes.push({ id, kind: 'Class', name, path: relPath, lang, startLine: i + 1, updated_at: now }); edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id, evidence: [{ file: relPath, line: i + 1, snippet: line.trim().slice(0, 120) }], sources: ['parser'], confidence: 0.8, conflict: false, updated_at: now }); continue; }
+      const swiftProto = line.match(/^(?:public|private|internal)?\s*protocol\s+(\w+)/);
+      if (swiftProto) { const name = swiftProto[1]; const id = interfaceId(relPath, name); nodes.push({ id, kind: 'Interface', name, path: relPath, lang, startLine: i + 1, updated_at: now }); edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id, evidence: [{ file: relPath, line: i + 1, snippet: line.trim().slice(0, 120) }], sources: ['parser'], confidence: 0.8, conflict: false, updated_at: now }); continue; }
+    }
+
+    // ── Kotlin: fun Name() / class Name / interface Name ──
+    if (lang === 'kotlin') {
+      const ktFun = line.match(/^(?:public|private|protected|internal|suspend)?\s*fun\s+(\w+)/);
+      if (ktFun) { const name = ktFun[1]; const kind = isMethod(line) ? 'Method' : 'Function'; const id = functionId(relPath, name); nodes.push({ id, kind, name, path: relPath, lang, startLine: i + 1, updated_at: now }); edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id, evidence: [{ file: relPath, line: i + 1, snippet: line.trim().slice(0, 120) }], sources: ['parser'], confidence: 0.8, conflict: false, updated_at: now }); continue; }
+      const ktClass = line.match(/^(?:data\s+)?(?:open\s+)?(?:abstract\s+)?(?:sealed\s+)?class\s+(\w+)/);
+      if (ktClass) { const name = ktClass[1]; const id = classId(relPath, name); nodes.push({ id, kind: 'Class', name, path: relPath, lang, startLine: i + 1, updated_at: now }); edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id, evidence: [{ file: relPath, line: i + 1, snippet: line.trim().slice(0, 120) }], sources: ['parser'], confidence: 0.8, conflict: false, updated_at: now }); continue; }
+      const ktIface = line.match(/^interface\s+(\w+)/);
+      if (ktIface) { const name = ktIface[1]; const id = interfaceId(relPath, name); nodes.push({ id, kind: 'Interface', name, path: relPath, lang, startLine: i + 1, updated_at: now }); edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id, evidence: [{ file: relPath, line: i + 1, snippet: line.trim().slice(0, 120) }], sources: ['parser'], confidence: 0.8, conflict: false, updated_at: now }); continue; }
+    }
+
+    // ── Scala: def Name() / class Name / trait Name / object Name ──
+    if (lang === 'scala') {
+      const scalaDef = line.match(/^(?:override\s+)?(?:def|val|var)\s+(\w+)/);
+      if (scalaDef && !['class', 'object', 'trait', 'type', 'if', 'for', 'while', 'return', 'val', 'var'].includes(scalaDef[1])) {
+        const name = scalaDef[1]; const kind = isMethod(line) ? 'Method' : 'Function'; const id = functionId(relPath, name); nodes.push({ id, kind, name, path: relPath, lang, startLine: i + 1, updated_at: now }); edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id, evidence: [{ file: relPath, line: i + 1, snippet: line.trim().slice(0, 120) }], sources: ['parser'], confidence: 0.7, conflict: false, updated_at: now }); continue; }
+      const scalaClass = line.match(/^(?:case\s+)?class\s+(\w+)/);
+      if (scalaClass) { const name = scalaClass[1]; const id = classId(relPath, name); nodes.push({ id, kind: 'Class', name, path: relPath, lang, startLine: i + 1, updated_at: now }); edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id, evidence: [{ file: relPath, line: i + 1, snippet: line.trim().slice(0, 120) }], sources: ['parser'], confidence: 0.8, conflict: false, updated_at: now }); continue; }
+      const scalaTrait = line.match(/^trait\s+(\w+)/);
+      if (scalaTrait) { const name = scalaTrait[1]; const id = interfaceId(relPath, name); nodes.push({ id, kind: 'Interface', name, path: relPath, lang, startLine: i + 1, updated_at: now }); edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id, evidence: [{ file: relPath, line: i + 1, snippet: line.trim().slice(0, 120) }], sources: ['parser'], confidence: 0.8, conflict: false, updated_at: now }); continue; }
+    }
+
+    // ── C/C++: function Name() / struct Name / class Name ──
+    if (lang === 'c' || lang === 'cpp') {
+      const cFunc = line.match(/^(?:static\s+|inline\s+|extern\s+)?(?:\w+(?:\s*\*)+)\s+(\w+)\s*\(/);
+      if (cFunc && !['if', 'for', 'while', 'switch', 'return', 'sizeof', 'typeof', 'struct', 'class', 'enum', 'typedef', 'define', 'include', 'ifdef', 'ifndef', 'pragma'].includes(cFunc[1])) {
+        const name = cFunc[1]; const id = functionId(relPath, name); nodes.push({ id, kind: 'Function', name, path: relPath, lang, startLine: i + 1, updated_at: now }); edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id, evidence: [{ file: relPath, line: i + 1, snippet: line.trim().slice(0, 120) }], sources: ['parser'], confidence: 0.7, conflict: false, updated_at: now }); continue; }
+      if (lang === 'cpp') {
+        const cppClass = line.match(/^(?:class|struct)\s+(\w+)/);
+        if (cppClass && !['if', 'for', 'while', 'switch'].includes(cppClass[1])) {
+          const name = cppClass[1]; const id = classId(relPath, name); nodes.push({ id, kind: 'Class', name, path: relPath, lang, startLine: i + 1, updated_at: now }); edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id, evidence: [{ file: relPath, line: i + 1, snippet: line.trim().slice(0, 120) }], sources: ['parser'], confidence: 0.7, conflict: false, updated_at: now }); continue; }
+      }
+    }
+
+    // ── Fallback: generic function/class patterns for any language ──
+    const fnMatch = line.match(/(?:^|\s)(?:func|function|fn|def|sub|proc|fun)\s+(\w+)/);
     if (fnMatch) {
       const name = fnMatch[1];
       const id = functionId(relPath, name);
-      nodes.push({
-        id, kind: 'Function', name, path: relPath, lang,
-        startLine: i + 1, updated_at: now,
-      });
-      edges.push({
-        id: edgeId(fId, id, 'CONTAINS'),
-        type: 'CONTAINS', from: fId, to: id,
+      nodes.push({ id, kind: 'Function', name, path: relPath, lang, startLine: i + 1, updated_at: now });
+      edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id,
         evidence: [{ file: relPath, line: i + 1, snippet: fnMatch[0].slice(0, 120) }],
-        sources: ['parser'], confidence: 0.7, conflict: false, updated_at: now,
-      });
+        sources: ['parser'], confidence: 0.6, conflict: false, updated_at: now });
+    }
+
+    const clsMatch = line.match(/(?:^|\s)(?:class|struct)\s+(\w+)/);
+    if (clsMatch) {
+      const name = clsMatch[1];
+      if (!['if', 'for', 'while', 'switch', 'return', 'new', 'typeof', 'sizeof'].includes(name)) {
+        const id = classId(relPath, name);
+        nodes.push({ id, kind: 'Class', name, path: relPath, lang, startLine: i + 1, updated_at: now });
+        edges.push({ id: edgeId(fId, id, 'CONTAINS'), type: 'CONTAINS', from: fId, to: id,
+          evidence: [{ file: relPath, line: i + 1, snippet: clsMatch[0].slice(0, 120) }],
+          sources: ['parser'], confidence: 0.6, conflict: false, updated_at: now });
+      }
     }
   }
 }
@@ -1449,33 +1883,168 @@ function extractManifests(
 ): void {
   for (let i = 0; i < relativeFiles.length; i++) {
     const rel = relativeFiles[i];
-    if (!rel.endsWith('package.json')) continue;
     let json: any;
     try {
       json = JSON.parse(readFileSync(absFiles[i], 'utf-8'));
     } catch {
       continue;
     }
-    const name = json.name ?? rel.replace(/\/package\.json$/, '');
-    const version = json.version ?? 'workspace';
-    const pId = `pkg:${name}@${version}`;
-    ensureNode(nodes, {
-      id: pId, kind: 'Package', name, path: rel, lang: 'json', updated_at: now,
-      metadata: { version },
-    });
-    const deps = { ...(json.dependencies ?? {}), ...(json.peerDependencies ?? {}) };
-    for (const [dep, ver] of Object.entries(deps)) {
-      const extId = `ext:${dep}`;
-      ensureNode(nodes, {
-        id: extId, kind: 'External', name: dep, updated_at: now,
-        metadata: { version: String(ver) },
-      });
-      pushEdge(edges, {
-        id: edgeId(pId, extId, 'DEPENDS_ON'),
-        type: 'DEPENDS_ON', from: pId, to: extId,
-        evidence: [{ file: rel, line: 1, snippet: `"${dep}": "${String(ver)}"` }],
-        sources: ['lockfile'], confidence: 1.0, conflict: false, updated_at: now,
-      });
+
+    // ── package.json (Node.js) ──
+    if (rel.endsWith('package.json') && !rel.includes('node_modules')) {
+      const name = json.name ?? rel.replace(/\/package\.json$/, '');
+      const version = json.version ?? 'workspace';
+      const pId = `pkg:${name}@${version}`;
+      ensureNode(nodes, { id: pId, kind: 'Package', name, path: rel, lang: 'json', updated_at: now, metadata: { version } });
+      const deps = { ...(json.dependencies ?? {}), ...(json.peerDependencies ?? {}) };
+      for (const [dep, ver] of Object.entries(deps)) {
+        const extId = `ext:${dep}`;
+        ensureNode(nodes, { id: extId, kind: 'External', name: dep, updated_at: now, metadata: { version: String(ver) } });
+        pushEdge(edges, { id: edgeId(pId, extId, 'DEPENDS_ON'), type: 'DEPENDS_ON', from: pId, to: extId,
+          evidence: [{ file: rel, line: 1, snippet: `"${dep}": "${String(ver)}"` }],
+          sources: ['lockfile'], confidence: 1.0, conflict: false, updated_at: now });
+      }
+    }
+
+    // ── Cargo.toml (Rust) ──
+    if (rel.endsWith('Cargo.toml')) {
+      const name = json.package?.name ?? rel.replace(/\/Cargo\.toml$/, '');
+      const version = json.package?.version ?? '0.0.0';
+      const pId = `pkg:${name}@${version}`;
+      ensureNode(nodes, { id: pId, kind: 'Package', name, path: rel, lang: 'toml', updated_at: now, metadata: { version } });
+      const allDeps = { ...(json.dependencies ?? {}), ...(json.dev_dependencies ?? {}), ...(json.build_dependencies ?? {}) };
+      for (const [dep, spec] of Object.entries(allDeps)) {
+        const ver = typeof spec === 'string' ? spec : (spec as any).version ?? '*';
+        const extId = `ext:${dep}`;
+        ensureNode(nodes, { id: extId, kind: 'External', name: dep, updated_at: now, metadata: { version: String(ver) } });
+        pushEdge(edges, { id: edgeId(pId, extId, 'DEPENDS_ON'), type: 'DEPENDS_ON', from: pId, to: extId,
+          evidence: [{ file: rel, line: 1, snippet: `${dep} = "${ver}"` }],
+          sources: ['lockfile'], confidence: 1.0, conflict: false, updated_at: now });
+      }
+    }
+
+    // ── go.mod (Go) ──
+    if (rel.endsWith('go.mod')) {
+      const name = json.module ?? rel.replace(/\/go\.mod$/, '');
+      const pId = `pkg:${name}@go`;
+      ensureNode(nodes, { id: pId, kind: 'Package', name, path: rel, lang: 'toml', updated_at: now });
+      if (json.require) {
+        for (const req of json.require) {
+          const extId = `ext:${req.path}`;
+          ensureNode(nodes, { id: extId, kind: 'External', name: req.path, updated_at: now, metadata: { version: req.version } });
+          pushEdge(edges, { id: edgeId(pId, extId, 'DEPENDS_ON'), type: 'DEPENDS_ON', from: pId, to: extId,
+            evidence: [{ file: rel, line: 1, snippet: `require ${req.path} ${req.version}` }],
+            sources: ['lockfile'], confidence: 1.0, conflict: false, updated_at: now });
+        }
+      }
+    }
+
+    // ── pom.xml (Maven/Java) ──
+    if (rel.endsWith('pom.xml')) {
+      const groupId = json.groupId ?? '';
+      const artifactId = json.artifactId ?? rel.replace(/\/pom\.xml$/, '');
+      const version = json.version ?? '0.0.0';
+      const name = `${groupId}:${artifactId}`;
+      const pId = `pkg:${name}@${version}`;
+      ensureNode(nodes, { id: pId, kind: 'Package', name: artifactId, path: rel, lang: 'xml', updated_at: now, metadata: { version, groupId } });
+      if (json.dependencies?.dependency) {
+        const deps = Array.isArray(json.dependencies.dependency) ? json.dependencies.dependency : [json.dependencies.dependency];
+        for (const dep of deps) {
+          const extId = `ext:${dep.groupId}:${dep.artifactId}`;
+          ensureNode(nodes, { id: extId, kind: 'External', name: dep.artifactId, updated_at: now, metadata: { version: dep.version } });
+          pushEdge(edges, { id: edgeId(pId, extId, 'DEPENDS_ON'), type: 'DEPENDS_ON', from: pId, to: extId,
+            evidence: [{ file: rel, line: 1, snippet: `${dep.groupId}:${dep.artifactId}:${dep.version}` }],
+            sources: ['lockfile'], confidence: 1.0, conflict: false, updated_at: now });
+        }
+      }
+    }
+
+    // ── build.gradle / build.gradle.kts (Gradle) ──
+    if (rel.endsWith('build.gradle') || rel.endsWith('build.gradle.kts')) {
+      const name = rel.replace(/\/build\.gradle(.kts)?$/, '');
+      const pId = `pkg:${name}@gradle`;
+      ensureNode(nodes, { id: pId, kind: 'Package', name, path: rel, lang: 'groovy', updated_at: now });
+      // Parse dependencies block from content
+      const content = readFileSync(absFiles[i], 'utf-8');
+      const depMatches = content.matchAll(/(?:implementation|api|compile|testImplementation)\s+['"]([^'"]+):([^'"]+):([^'"]+)['"]/g);
+      for (const m of depMatches) {
+        const [, group, artifact, ver] = m;
+        const extId = `ext:${group}:${artifact}`;
+        ensureNode(nodes, { id: extId, kind: 'External', name: artifact, updated_at: now, metadata: { version: ver } });
+        pushEdge(edges, { id: edgeId(pId, extId, 'DEPENDS_ON'), type: 'DEPENDS_ON', from: pId, to: extId,
+          evidence: [{ file: rel, line: 1, snippet: `${group}:${artifact}:${ver}` }],
+          sources: ['lockfile'], confidence: 0.9, conflict: false, updated_at: now });
+      }
+    }
+
+    // ── Gemfile (Ruby) ──
+    if (rel.endsWith('Gemfile')) {
+      const name = rel.replace(/\/Gemfile$/, '');
+      const pId = `pkg:${name}@ruby`;
+      ensureNode(nodes, { id: pId, kind: 'Package', name, path: rel, lang: 'ruby', updated_at: now });
+      const content = readFileSync(absFiles[i], 'utf-8');
+      const gemMatches = content.matchAll(/^\s*gem\s+['"]([^'"]+)['"](?:.*?version\s*['"]([^'"]+)['"])?/gm);
+      for (const m of gemMatches) {
+        const gemName = m[1]; const ver = m[2] ?? '*';
+        const extId = `ext:${gemName}`;
+        ensureNode(nodes, { id: extId, kind: 'External', name: gemName, updated_at: now, metadata: { version: ver } });
+        pushEdge(edges, { id: edgeId(pId, extId, 'DEPENDS_ON'), type: 'DEPENDS_ON', from: pId, to: extId,
+          evidence: [{ file: rel, line: 1, snippet: `gem '${gemName}'` }],
+          sources: ['lockfile'], confidence: 0.9, conflict: false, updated_at: now });
+      }
+    }
+
+    // ── composer.json (PHP) ──
+    if (rel.endsWith('composer.json')) {
+      const name = json.name ?? rel.replace(/\/composer\.json$/, '');
+      const version = json.version ?? '0.0.0';
+      const pId = `pkg:${name}@${version}`;
+      ensureNode(nodes, { id: pId, kind: 'Package', name, path: rel, lang: 'json', updated_at: now, metadata: { version } });
+      const deps = { ...(json.require ?? {}), ...(json['require-dev'] ?? {}) };
+      for (const [dep, ver] of Object.entries(deps)) {
+        if (dep === 'php') continue;
+        const extId = `ext:${dep}`;
+        ensureNode(nodes, { id: extId, kind: 'External', name: dep, updated_at: now, metadata: { version: String(ver) } });
+        pushEdge(edges, { id: edgeId(pId, extId, 'DEPENDS_ON'), type: 'DEPENDS_ON', from: pId, to: extId,
+          evidence: [{ file: rel, line: 1, snippet: `"${dep}": "${ver}"` }],
+          sources: ['lockfile'], confidence: 1.0, conflict: false, updated_at: now });
+      }
+    }
+
+    // ── requirements.txt / setup.py / pyproject.toml (Python) ──
+    if (rel.endsWith('requirements.txt')) {
+      const name = rel.replace(/\/requirements\.txt$/, '');
+      const pId = `pkg:${name}@python`;
+      ensureNode(nodes, { id: pId, kind: 'Package', name, path: rel, lang: 'text', updated_at: now });
+      const content = readFileSync(absFiles[i], 'utf-8');
+      const lines = content.split('\n').filter(l => l.trim() && !l.startsWith('#'));
+      for (const line of lines) {
+        const m = line.match(/^([a-zA-Z0-9_-]+)(.*)/);
+        if (m) {
+          const extId = `ext:${m[1].toLowerCase()}`;
+          ensureNode(nodes, { id: extId, kind: 'External', name: m[1], updated_at: now });
+          pushEdge(edges, { id: edgeId(pId, extId, 'DEPENDS_ON'), type: 'DEPENDS_ON', from: pId, to: extId,
+            evidence: [{ file: rel, line: 1, snippet: line.trim().slice(0, 120) }],
+            sources: ['lockfile'], confidence: 0.9, conflict: false, updated_at: now });
+        }
+      }
+    }
+
+    // ── pyproject.toml (Python) ──
+    if (rel.endsWith('pyproject.toml')) {
+      const name = json.project?.name ?? rel.replace(/\/pyproject\.toml$/, '');
+      const version = json.project?.version ?? '0.0.0';
+      const pId = `pkg:${name}@${version}`;
+      ensureNode(nodes, { id: pId, kind: 'Package', name, path: rel, lang: 'toml', updated_at: now, metadata: { version } });
+      const deps = [...(json.project?.dependencies ?? []), ...(json.project?.['optional-dependencies']?.all ?? [])];
+      for (const dep of deps) {
+        const depName = dep.split(/[>=<!\[]/)[0].trim().toLowerCase();
+        const extId = `ext:${depName}`;
+        ensureNode(nodes, { id: extId, kind: 'External', name: depName, updated_at: now });
+        pushEdge(edges, { id: edgeId(pId, extId, 'DEPENDS_ON'), type: 'DEPENDS_ON', from: pId, to: extId,
+          evidence: [{ file: rel, line: 1, snippet: dep.slice(0, 120) }],
+          sources: ['lockfile'], confidence: 0.9, conflict: false, updated_at: now });
+      }
     }
   }
 }

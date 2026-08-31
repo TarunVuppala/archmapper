@@ -79,7 +79,13 @@ const routes: Route[] = [
     method: 'POST',
     path: '/v1/diff_impact',
     handler: (body, store) => {
-      return envelope(computeDiffImpact(store, body.base ?? 'main', body.head ?? 'HEAD'));
+      const mode = body.mode ?? (body.staged ? 'staged' : body.working ? 'working' : body.base ? 'range' : 'working');
+      return envelope(computeDiffImpact(store, {
+        base: body.base,
+        head: body.head,
+        mode,
+        repoPath: process.cwd(),
+      }));
     },
   },
   {

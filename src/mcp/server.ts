@@ -69,12 +69,17 @@ const TOOLS = [
   },
   {
     name: 'diff_impact',
-    description: 'Compute symbol-level diff impact between two versions',
+    description: 'Symbol-level git diff impact. Defaults to working tree vs HEAD. Pass base/head for a commit range, or mode=staged|working|range.',
     inputSchema: {
       type: 'object' as const,
       properties: {
-        base: { type: 'string', default: 'main' },
-        head: { type: 'string', default: 'HEAD' },
+        base: { type: 'string', description: 'Base ref (range mode; default main)' },
+        head: { type: 'string', description: 'Head ref (range mode; default HEAD)' },
+        mode: {
+          type: 'string',
+          enum: ['range', 'working', 'staged'],
+          description: 'working = uncommitted vs HEAD; staged = index vs HEAD; range = base...head',
+        },
       },
     },
   },
@@ -247,7 +252,13 @@ function handleToolCall(name: string, args: any, store: GraphStore): any {
     }
 
     case 'diff_impact': {
-      const result = computeDiffImpact(store, args.base ?? 'main', args.head ?? 'HEAD');
+      const mode = args.mode ?? (args.base ? 'range' : 'working');
+      const result = computeDiffImpact(store, {
+        base: args.base,
+        head: args.head,
+        mode,
+        repoPath: process.cwd(),
+      });
       return { content: [{ type: 'text', text: JSON.stringify(envelope(result)) }] };
     }
 

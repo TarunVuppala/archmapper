@@ -137,6 +137,19 @@ export interface RiskChip {
   nodeId?: string;
 }
 
+export interface AffectedGroup {
+  kind: NodeKind;
+  label: string;
+  icon: string;
+  items: Array<{
+    id: string;
+    name: string;
+    path?: string;
+    startLine?: number;
+    evidence?: Evidence;
+  }>;
+}
+
 export interface ImpactResult {
   ok: boolean;
   startIds: string[];
@@ -149,6 +162,12 @@ export interface ImpactResult {
   riskChips: RiskChip[];
   docsForExternals: string[];
   suggestedReviewers: string[];
+  /** Affected items grouped by kind for display */
+  affectedByKind?: AffectedGroup[];
+  /** Natural language summary of the impact */
+  summary?: string;
+  /** Severity rating: low, medium, critical */
+  severity?: 'low' | 'medium' | 'critical';
 }
 
 // ─── Diff Impact ───────────────────────────────────────────────────────────────
@@ -162,13 +181,18 @@ export interface SymbolDiff {
   newSignature?: string;
 }
 
+export type DiffMode = 'range' | 'working' | 'staged';
+
 export interface DiffImpactResult {
   ok: boolean;
   base: string;
   head: string;
+  mode: DiffMode;
   changedSymbols: SymbolDiff[];
   impact: ImpactResult;
   contractDeltas: string[];
+  changedPaths: string[];
+  gitError?: string;
 }
 
 // ─── Canonical Envelope ────────────────────────────────────────────────────────

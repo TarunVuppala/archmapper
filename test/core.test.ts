@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { GraphStore } from '../src/core/store.js';
 import { computeImpact } from '../src/core/impact.js';
-import { computeDiffImpact, diffSymbols } from '../src/core/diff.js';
+import { computeDiffImpact } from '../src/core/diff.js';
 import { evaluatePolicies } from '../src/core/policy.js';
 import { RAGIndex } from '../src/core/rag.js';
 import { healthCheck } from '../src/core/health.js';
@@ -172,7 +172,7 @@ describe('GraphStore', () => {
   it('searches nodes', () => {
     store.upsertNode(makeNode({ id: 'fn:a', name: 'createItem' }));
     store.upsertNode(makeNode({ id: 'fn:b', name: 'validateItem' }));
-    const results = store.searchNodes('process');
+    const results = store.searchNodes('create');
     expect(results.length).toBeGreaterThanOrEqual(1);
     expect(results[0].name).toBe('createItem');
   });
@@ -311,10 +311,10 @@ describe('Diff Impact', () => {
   });
 
   it('computes diff impact', () => {
-    const result = computeDiffImpact(store, 'main', 'HEAD');
+    const result = computeDiffImpact(store, { base: 'main', head: 'HEAD', mode: 'range', repoPath: tmpDir });
     expect(result.ok).toBe(true);
-    expect(result.base).toBe('main');
-    expect(result.head).toBe('HEAD');
+    expect(result.mode).toBe('range');
+    expect(result.changedSymbols).toEqual([]);
   });
 });
 

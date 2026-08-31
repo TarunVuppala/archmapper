@@ -296,6 +296,62 @@ export function computeImpact(
     if (uniquePaths.length >= maxPaths) break;
   }
 
+  // Build grouped affected items by kind
+  const KIND_META: Record<string, { label: string; icon: string }> = {
+    Function: { label: 'Functions', icon: '⚡' },
+    Method: { label: 'Methods', icon: '⚡' },
+    Class: { label: 'Classes', icon: '📦' },
+    Interface: { label: 'Interfaces', icon: '🔌' },
+    Table: { label: 'Database Tables', icon: '🗄️' },
+    API: { label: 'API Endpoints', icon: '🌐' },
+    Service: { label: 'Services', icon: '🏛️' },
+    Test: { label: 'Tests', icon: '🧪' },
+    External: { label: 'External Dependencies', icon: '🔗' },
+    Event: { label: 'Events', icon: '📣' },
+    File: { label: 'Files', icon: '📄' },
+    Module: { label: 'Modules', icon: '📁' },
+    Package: { label: 'Packages', icon: '📦' },
+  };
+
+  const affectedByKind: import('./types.js').AffectedGroup[] = [];
+  const kindOrder = ['Function', 'Method', 'Class', 'Interface', 'API', 'Table', 'Service', 'Event', 'External', 'Test', 'File', 'Module', 'Package'];
+
+  for (const kind of kindOrder) {
+    const count = counts[kind as import('./types.js').NodeKind] ?? 0;
+    if (count === 0) continue;
+    const meta = KIND_META[kind] ?? { label: kind, icon: '•' };
+    const items = nodes
+      .filter(n => n.kind === kind && !startIds.includes(n.id))
+      .map(n => ({
+        id: n.id,
+        name: n.name,
+        path: n.path,
+        startLine: n.startLine,
+      }));
+    affectedByKind.push({ kind: kind as import('./types.js').NodeKind, label: meta.label, icon: meta.icon, items });
+  }
+
+  // Generate natural language summary
+  const startNode = store.getNode(startIds[0]);
+  const startName = startNode?.name ?? startIds[0] ?? 'this code';
+  const totalAffected = nodes.filter(n => !startIds.includes(n.id) && n.kind !== 'File').length;
+  const parts: string[] = [];
+  for (const g of affectedByKind) {
+    if (g.items.length > 0) parts.push(`${g.items.length} ${g.label.toLowerCase()}`);
+  }
+  const summary = parts.length > 0
+    ? `Changing ${startName} would affect ${parts.join(', ')} (${totalAffected} total).`
+    : `No downstream impact found for ${startName}.`;
+
+  // Determine severity
+  const hasCritical = uniqueRisk.some(r => r.kind === 'critical' || r.kind === 'conflict');
+  const hasUntested = uniqueRisk.some(r => r.kind === 'untested');
+  const hasDbWrite = uniqueRisk.some(r => r.kind === 'db_write');
+  const hasExternal = uniqueRisk.some(r => r.kind === 'external');
+  let severity: 'low' | 'medium' | 'critical' = 'low';
+  if (hasCritical || totalAffected > 10) severity = 'critical';
+  else if (hasUntested || hasDbWrite || hasExternal || totalAffected > 3) severity = 'medium';
+
   return {
     ok: true,
     startIds,
@@ -308,6 +364,9 @@ export function computeImpact(
     riskChips: uniqueRisk,
     docsForExternals,
     suggestedReviewers: [],
+    affectedByKind,
+    summary,
+    severity,
   };
 }
 

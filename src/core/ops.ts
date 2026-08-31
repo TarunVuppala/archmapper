@@ -25,6 +25,8 @@ import { reconstructFlow } from './flow.js';
 import { RAGIndex } from './rag.js';
 import { verifyGraph } from './verify.js';
 import { resolveDocs } from './docs.js';
+import { computeDiffImpact, type DiffOptions } from './diff.js';
+import type { DiffImpactResult } from './types.js';
 
 export function resolve(store: GraphStore, idOrName: string): GraphNode | undefined {
   return store.resolveNode(idOrName);
@@ -127,6 +129,10 @@ export function graphExportOp(
 
 export function docsOp(store: GraphStore, idOrName: string) {
   return envelope(resolveDocs(store, idOrName));
+}
+
+export function diffOp(store: GraphStore, options: DiffOptions = {}): CanonicalEnvelope<DiffImpactResult> {
+  return envelope(computeDiffImpact(store, options));
 }
 
 export { mermaidFromView };

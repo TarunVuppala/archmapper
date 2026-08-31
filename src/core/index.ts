@@ -4,7 +4,7 @@
 
 export { GraphStore } from './store.js';
 export { computeImpact, type ImpactOptions } from './impact.js';
-export { computeDiffImpact, diffSymbols, type DiffOptions } from './diff.js';
+export { computeDiffImpact, diffSymbols, gitChangedFiles, gitChangedPaths, type DiffOptions, type ChangedFile } from './diff.js';
 export { evaluatePolicies, type Policy } from './policy.js';
 export { RAGIndex, type RAGChunk } from './rag.js';
 export { Journal, type JournalEntry } from './journal.js';
@@ -19,7 +19,6 @@ export { identifyFromGraph } from './identify.js';
 export { loadSeed, applySeed, type SeedFile } from './seed.js';
 export { verifyGraph, verifyPlanEnvelope, verifyEvidenceSnippets } from './verify.js';
 export { resolveDocs } from './docs.js';
-export { gitChangedPaths } from './diff.js';
 export * from './ops.js';
 export * from './ids.js';
 export * from './types.js';
