@@ -71,6 +71,65 @@ function getHTML(): string {
       position: relative;
       background: radial-gradient(circle at center, #130604 0%, #000000 100%);
     }
+    #graph-chrome {
+      position: absolute;
+      top: 16px;
+      left: 16px;
+      right: 16px;
+      z-index: 5;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      pointer-events: none;
+      gap: 12px;
+    }
+    #graph-chrome > * { pointer-events: auto; }
+    #breadcrumb {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-muted);
+      background: rgba(0,0,0,0.55);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 8px;
+      padding: 8px 12px;
+    }
+    #breadcrumb button {
+      background: transparent;
+      border: none;
+      color: #fff;
+      cursor: pointer;
+      font-weight: 600;
+      font-family: inherit;
+    }
+    #breadcrumb button:hover { color: var(--primary); }
+    #legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      background: rgba(0,0,0,0.55);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 10px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+    #legend span { display: flex; align-items: center; gap: 5px; }
+    #legend i {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+      background: #ca3e1c;
+    }
+    #legend i.mod { border-radius: 3px; width: 14px; height: 9px; }
+    #legend i.api { transform: rotate(45deg); border-radius: 1px; }
+    #legend i.tbl { border-radius: 50%; }
+    #legend i.ext { border-radius: 50%; background: transparent; border: 2px solid #0284c7; }
+    #legend i.fn { border-radius: 50%; background: #ebdcb9; }
 
     svg#visualizer {
       width: 100%;
@@ -223,8 +282,9 @@ function getHTML(): string {
       transform: translateX(4px);
     }
     .node-item.selected {
-      background: rgba(202, 62, 28, 0.08);
+      background: rgba(202, 62, 28, 0.18);
       border-color: var(--primary);
+      box-shadow: 0 0 0 1px var(--primary);
     }
 
     .node-header-row {
@@ -320,20 +380,26 @@ function getHTML(): string {
       opacity: 0.08;
     }
     .node-g.selected .node-shape {
-      stroke: #ffffff;
-      stroke-width: 3px;
+      stroke: #ffffff !important;
+      stroke-width: 4px !important;
     }
     .node-g.selected text.node-label {
-      fill: #ffffff;
-      opacity: 1;
+      fill: #ffffff !important;
+      opacity: 1 !important;
+      font-size: 13px;
+      font-weight: 700;
     }
 
     .node-label {
-      font-size: 10px;
-      fill: var(--text-muted);
+      font-size: 11px;
+      fill: #f4f0ea;
       pointer-events: none;
-      font-weight: 500;
-      transition: fill 0.3s, font-size 0.3s, opacity 0.3s;
+      font-weight: 600;
+      opacity: 0;
+      paint-order: stroke;
+      stroke: #000;
+      stroke-width: 3px;
+      transition: fill 0.15s, opacity 0.15s;
     }
     .node-label.active {
       fill: #ffffff;
@@ -540,6 +606,16 @@ function getHTML(): string {
 
     <!-- Center Visualization Screen -->
     <div id="graph-container">
+      <div id="graph-chrome">
+        <div id="breadcrumb">Overview · packages as islands — double-click a package to open it</div>
+        <div id="legend">
+          <span><i class="mod"></i> Package</span>
+          <span><i class="api"></i> API</span>
+          <span><i class="tbl"></i> Data</span>
+          <span><i class="ext"></i> External</span>
+          <span><i class="fn"></i> Symbol</span>
+        </div>
+      </div>
       <svg id="visualizer">
         <!-- Filters Definitions -->
         <defs>

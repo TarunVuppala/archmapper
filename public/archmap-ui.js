@@ -14,7 +14,14 @@
     let allEdges = [];
     let selectedNode = null;
     let hoveredNode = null;
-    let currentView = 'all';
+    let currentView = 'overview';
+    let focusDir = null; // depth: which package island is open
+    let projection = { nodes: [], edges: [] };
+
+    const OVERVIEW_KINDS = new Set([
+      'Service', 'Package', 'API', 'Table', 'External', 'Class',
+      'Event', 'Infra', 'Contract', 'Module', 'Interface',
+    ]);
 
     // Map each unique subdirectory directory tree to a base color
     let directoryColorMap = {};
@@ -86,25 +93,12 @@
         const height = svgNode ? svgNode.clientHeight || svgNode.getBoundingClientRect().height : window.innerHeight;
         svg.call(zoomBehavior.transform, d3.zoomIdentity.translate(width / 2, height / 2).scale(0.8));
 
-        // Force layout once, then freeze so clicks / the detail panel never scatter nodes.
-        simulation = d3.forceSimulation(allNodes)
-          .velocityDecay(0.45)
-          .alphaDecay(0.06)
-          .alphaMin(0.001)
-          .force("link", d3.forceLink(validEdges).id(d => d.id).distance(d => d.type === 'CONTAINS' ? 70 : 140).strength(0.5))
-          .force("charge", d3.forceManyBody().strength(-160))
-          .force("x", d3.forceX(0).strength(0.06))
-          .force("y", d3.forceY(0).strength(0.06))
-          .force("collision", d3.forceCollide().radius(d => getRadius(d) + 14))
-          .on("tick", ticked)
-          .on("end", freezeLayout);
-
         // 5. Register Event Listeners
         initEvents();
 
-        // 6. Initial Render
+        // 6. Draw the overview (not the file hairball) and lay it out once
         renderNodeList();
-        updateGraphVisuals(validEdges);
+        refreshGraph(true);
       } catch (err) {
         console.error("Architecture Mapper UI Initialization failed:", err);
         const list = document.getElementById('nodeList');
@@ -123,19 +117,164 @@
       if (simulation) simulation.stop();
     }
 
-    function getRadius(d) {
-      if (d.kind === 'File') return 8;
-      if (d.kind === 'API' || d.kind === 'Table') return 15;
-      if (d.kind === 'Class') return 13;
-      return 10; // functions & others
+    function edgeEnds(e) {
+      const from = typeof e.from === 'object' ? e.from.id : (typeof e.source === 'object' ? e.source.id : e.from || e.source);
+      const to = typeof e.to === 'object' ? e.to.id : (typeof e.target === 'object' ? e.target.id : e.to || e.target);
+      return { from, to };
     }
 
-    // Classify nodes into directory trees and build directory color index
+    function nodeDegree(id) {
+      let d = 0;
+      for (const e of allEdges) {
+        const { from, to } = edgeEnds(e);
+        if (from === id || to === id) d++;
+      }
+      return d;
+    }
+
+    function shortName(name) {
+      if (!name) return '';
+      const base = String(name).split('/').pop();
+      return base.length > 22 ? base.slice(0, 20) + '…' : base;
+    }
+
     function getDirectory(n) {
-      if (!n.path) return '';
-      const parts = n.path.split('/');
-      if (parts.length <= 1) return '';
+      if (!n || !n.path) return '';
+      const parts = String(n.path).replace(/\\/g, '/').split('/').filter(Boolean);
+      if (!parts.length) return '';
+      const top = ['app', 'apps', 'src', 'packages', 'lib', 'components', 'pages', 'api'];
+      if (top.includes(parts[0]) && parts[1]) return parts[0] + '/' + parts[1];
+      if (parts.length === 1) return parts[0];
       return parts.slice(0, Math.min(parts.length - 1, 2)).join('/');
+    }
+
+    function clusterId(dir) { return 'cluster:' + dir; }
+
+    function buildClusterProjection() {
+      const groups = new Map();
+      for (const n of allNodes) {
+        if (n.kind === 'File' || n.kind === 'External') continue;
+        const dir = getDirectory(n) || '(root)';
+        if (!groups.has(dir)) groups.set(dir, []);
+        groups.get(dir).push(n);
+      }
+      const clusters = [];
+      for (const [dir, members] of groups) {
+        clusters.push({
+          id: clusterId(dir),
+          kind: 'Module',
+          name: dir,
+          path: dir,
+          memberCount: members.length,
+          members,
+          isCluster: true,
+          updated_at: members[0]?.updated_at,
+        });
+      }
+      const extras = allNodes.filter(n =>
+        n.kind === 'External' || n.kind === 'API' || n.kind === 'Table' || n.kind === 'Service'
+      );
+      const nodes = [...clusters, ...extras];
+      const owner = new Map();
+      for (const c of clusters) for (const m of c.members) owner.set(m.id, c.id);
+      for (const e of extras) owner.set(e.id, e.id);
+
+      const agg = new Map();
+      for (const e of allEdges) {
+        if (e.type === 'CONTAINS') continue;
+        const { from, to } = edgeEnds(e);
+        const a = owner.get(from);
+        const b = owner.get(to);
+        if (!a || !b || a === b) continue;
+        const key = a + '>' + b;
+        if (!agg.has(key)) {
+          agg.set(key, {
+            id: 'agg:' + key, type: e.type || 'DEPENDS_ON',
+            from: a, to: b, source: a, target: b, count: 0,
+            evidence: e.evidence,
+          });
+        }
+        agg.get(key).count += 1;
+      }
+      return { nodes, edges: [...agg.values()] };
+    }
+
+    function visibleNodes() {
+      let nodes;
+      if (currentView === 'overview' && !focusDir) nodes = buildClusterProjection().nodes;
+      else if (focusDir) {
+        nodes = allNodes.filter(n => n.kind !== 'File' && getDirectory(n) === focusDir);
+      } else if (currentView === 'all') {
+        nodes = allNodes.filter(n => n.kind !== 'File');
+      } else {
+        nodes = allNodes.filter(n => n.kind === currentView);
+      }
+      if (selectedNode && !selectedNode.isCluster && !nodes.some(n => n.id === selectedNode.id)) {
+        if (focusDir && getDirectory(selectedNode) === focusDir) nodes = nodes.concat([selectedNode]);
+        else if (currentView === selectedNode.kind || currentView === 'all') nodes = nodes.concat([selectedNode]);
+      }
+      return nodes;
+    }
+
+    function visibleEdges(nodes) {
+      if (currentView === 'overview' && !focusDir) return buildClusterProjection().edges;
+      const ids = new Set(nodes.map(n => n.id));
+      return allEdges.filter(e => {
+        const { from, to } = edgeEnds(e);
+        if (!ids.has(from) || !ids.has(to)) return false;
+        if (e.type === 'CONTAINS') return false;
+        return true;
+      });
+    }
+
+    function relayout(nodes, edges) {
+      layoutFrozen = false;
+      nodes.forEach(n => { n.fx = null; n.fy = null; });
+      if (simulation) simulation.stop();
+      const linkEdges = edges.map(e => ({ ...e, source: edgeEnds(e).from, target: edgeEnds(e).to }));
+      const clustered = currentView === 'overview' && !focusDir;
+      simulation = d3.forceSimulation(nodes)
+        .velocityDecay(0.42)
+        .alphaDecay(0.05)
+        .alphaMin(0.001)
+        .force("link", d3.forceLink(linkEdges).id(d => d.id).distance(clustered ? 180 : 110).strength(0.35))
+        .force("charge", d3.forceManyBody().strength(clustered ? -420 : -140))
+        .force("x", d3.forceX(0).strength(0.04))
+        .force("y", d3.forceY(0).strength(0.04))
+        .force("collision", d3.forceCollide().radius(d => getRadius(d) + (d.isCluster ? 28 : 16)))
+        .on("tick", ticked)
+        .on("end", freezeLayout);
+    }
+
+    function refreshGraph(relayoutToo) {
+      const nodes = visibleNodes();
+      const edges = visibleEdges(nodes);
+      projection = { nodes, edges };
+      updateGraphVisuals(nodes, edges);
+      updateBreadcrumb();
+      if (relayoutToo) relayout(nodes, edges);
+    }
+
+    function updateBreadcrumb() {
+      const el = document.getElementById('breadcrumb');
+      if (!el) return;
+      if (focusDir) {
+        el.innerHTML = '<button type="button" id="bc-home">Overview</button><span>→</span><span style="color:#fff;font-weight:600;">' + focusDir + '</span>';
+        const btn = document.getElementById('bc-home');
+        if (btn) btn.onclick = () => { focusDir = null; currentView = 'overview'; refreshGraph(true); renderNodeList(); };
+      } else if (currentView === 'overview') {
+        el.textContent = 'Overview · each island is a package/folder — double-click to open';
+      } else {
+        el.textContent = currentView === 'all' ? 'All symbols (files hidden)' : (currentView + ' only');
+      }
+    }
+
+    function getRadius(d) {
+      if (d && d.isCluster) return 20 + Math.min(18, Math.sqrt(d.memberCount || 1) * 3);
+      if (d.kind === 'File') return 7;
+      if (d.kind === 'API' || d.kind === 'Table' || d.kind === 'Service') return 14;
+      if (d.kind === 'Class' || d.kind === 'External' || d.kind === 'Module') return 12;
+      return 9;
     }
 
     function initDirectoryTreeColors() {
@@ -167,7 +306,8 @@
       if (!tabContainer) return;
 
       const presentKinds = new Set(allNodes.map(n => n.kind));
-      let html = '<button class="tab active" data-view="all">All</button>';
+      let html = '<button class="tab active" data-view="overview">Overview</button>';
+      html += '<button class="tab" data-view="all">All</button>';
       
       const orderedKinds = ['Function', 'Method', 'Class', 'Interface', 'Table', 'API', 'File', 'External', 'Test'];
       orderedKinds.forEach(kind => {
@@ -201,9 +341,9 @@
     }
 
     // Interactive updates to SVG nodes and links
-    function updateGraphVisuals(validEdges) {
-      const activeKind = currentView;
-      const filterNodes = activeKind === 'all' ? allNodes : allNodes.filter(n => n.kind === activeKind);
+    function updateGraphVisuals(filterNodes, validEdges) {
+      if (!filterNodes) filterNodes = visibleNodes();
+      if (!validEdges) validEdges = visibleEdges(filterNodes);
       const activeIds = new Set(filterNodes.map(n => n.id));
 
       // Draw lines (Links)
@@ -224,14 +364,15 @@
 
       // Merge & update attributes
       const linkAll = linkEnter.merge(linkSelection)
+        .attr("stroke-width", d => d.count ? Math.min(5, 1 + Math.log2(d.count + 1)) : 1.5)
         .attr("marker-end", d => {
           const isSelectedPath = selectedNode && (d.source.id === selectedNode.id || d.target.id === selectedNode.id);
           return isSelectedPath ? "url(#arrow-" + d.type + "-highlight)" : "url(#arrow-" + d.type + ")";
         });
 
-      // Draw Nodes (Groups)
+      // Draw Nodes (Groups) — only the current projection, not the full hairball
       const nodeSelection = nodesLayer.selectAll("g.node-g")
-        .data(allNodes, d => d.id);
+        .data(filterNodes, d => d.id);
 
       nodeSelection.exit().remove();
 
@@ -241,6 +382,17 @@
           event.stopPropagation();
           triggerPressEffect(event, d);
           selectNode(d.id);
+        })
+        .on("dblclick", (event, d) => {
+          event.stopPropagation();
+          if (d.isCluster) {
+            focusDir = d.path;
+            currentView = 'overview';
+            selectedNode = null;
+            document.getElementById('detail-panel').classList.remove('open');
+            refreshGraph(true);
+            renderNodeList();
+          }
         })
         .on("mouseover", (event, d) => {
           setNodeHover(d, true);
@@ -256,67 +408,39 @@
 
       const nodeAll = nodeEnter.merge(nodeSelection);
 
-      // --- Morphing Geometric Shapes view ---
       nodeAll.each(function(d) {
         const el = d3.select(this);
-        el.selectAll(".node-shape").remove(); // clear previous shape to morph
-
+        el.selectAll(".node-shape").remove();
         const r = getRadius(d);
         const color = getNodeColor(d);
-
+        const kind = d.isCluster ? 'Module' : d.kind;
         let shape;
-
-        // MORPH shapes based on active tab view
-        if (currentView === 'all') {
-          // All View -> Standard elegant Circle
-          shape = el.append("circle")
-            .attr("r", r);
-        } else if (currentView === 'Function') {
-          // Functions Mode -> Render glowing Diamonds
-          shape = el.append("polygon")
-            .attr("points", '0,-' + (r * 1.25) + ' ' + (r * 1.25) + ',0 0,' + (r * 1.25) + ' -' + (r * 1.25) + ',0');
-        } else if (currentView === 'Method') {
-          // Methods Mode -> Render upward Triangles
-          shape = el.append("polygon")
-            .attr("points", '0,-' + (r * 1.3) + ' ' + (r * 1.2) + ',' + (r * 0.9) + ' -' + (r * 1.2) + ',' + (r * 0.9));
-        } else if (currentView === 'Class' || currentView === 'Interface') {
-          // Class Mode -> Render robust Squares
+        if (kind === 'Module' || kind === 'Service' || kind === 'Package' || d.isCluster) {
           shape = el.append("rect")
-            .attr("x", -r)
-            .attr("y", -r)
-            .attr("width", r * 2)
-            .attr("height", r * 2)
-            .attr("rx", 3);
-        } else if (currentView === 'Table') {
-          // Table Mode -> Render Hexagons
-          const w = r * 1.15 * 0.86;
-          const h = r * 1.15 * 0.5;
-          const rH = r * 1.15;
-          shape = el.append("polygon")
-            .attr("points", '0,-' + rH + ' ' + w + ',-' + h + ' ' + w + ',' + h + ' 0,' + rH + ' -' + w + ',' + h + ' -' + w + ',-' + h);
-        } else if (currentView === 'API') {
-          // API Mode -> Render Horizontal Diamonds
+            .attr("x", -r * 1.7).attr("y", -r * 0.8)
+            .attr("width", r * 3.4).attr("height", r * 1.6)
+            .attr("rx", 8);
+        } else if (kind === 'API' || kind === 'Route') {
           shape = el.append("polygon")
             .attr("points", '0,-' + (r * 1.2) + ' ' + (r * 1.2) + ',0 0,' + (r * 1.2) + ' -' + (r * 1.2) + ',0');
-        } else if (currentView === 'File') {
-          // File Mode -> Render Vertical Cards
+        } else if (kind === 'Table') {
+          const w = r * 1.15 * 0.86, h = r * 1.15 * 0.5, rH = r * 1.15;
+          shape = el.append("polygon")
+            .attr("points", '0,-' + rH + ' ' + w + ',-' + h + ' ' + w + ',' + h + ' 0,' + rH + ' -' + w + ',' + h + ' -' + w + ',-' + h);
+        } else if (kind === 'Class' || kind === 'Interface') {
           shape = el.append("rect")
-            .attr("x", -6)
-            .attr("y", -10)
-            .attr("width", 12)
-            .attr("height", 20)
-            .attr("rx", 1.5);
+            .attr("x", -r).attr("y", -r).attr("width", r * 2).attr("height", r * 2).attr("rx", 3);
+        } else if (kind === 'File') {
+          shape = el.append("rect").attr("x", -6).attr("y", -10).attr("width", 12).attr("height", 20).attr("rx", 1.5);
         } else {
-          // Fallback Circle
-          shape = el.append("circle")
-            .attr("r", r);
+          shape = el.append("circle").attr("r", r);
         }
-
+        const c = d3.color(color);
         shape.attr("class", "node-shape")
           .attr("fill", color)
-          .attr("fill-opacity", d.kind === 'File' ? 0.25 : 0.8)
-          .attr("stroke", d3.color(color).darker(0.35))
-          .attr("stroke-width", d.kind === 'File' ? 2 : 1.5);
+          .attr("fill-opacity", d.isCluster ? 0.35 : (d.kind === 'File' ? 0.25 : 0.85))
+          .attr("stroke", c ? c.brighter(0.6) : '#fff')
+          .attr("stroke-width", d.isCluster ? 2 : 1.5);
       });
 
       // Extra Holographic Concentric visual rings for APIs & Tables in All view
@@ -334,25 +458,65 @@
       nodeAll.selectAll("text.node-label").remove();
       nodeAll.append("text")
         .attr("class", "node-label")
-        .attr("y", d => d.kind === 'File' ? -15 : -getRadius(d) - 6)
+        .attr("y", d => d.isCluster ? 5 : (d.kind === 'File' ? -15 : -getRadius(d) - 6))
         .attr("text-anchor", "middle")
-        .text(d => d.name);
+        .text(d => d.isCluster ? (shortName(d.name) + ' · ' + d.memberCount) : shortName(d.name))
+        .style("opacity", d => d.isCluster ? 1 : 0);
 
-      // Apply Filter visual fades (Highlight view)
-      nodeAll.each(function(d) {
-        const el = d3.select(this);
-        const matchesType = activeIds.has(d.id);
-        el.classed("fade", !matchesType);
-        el.classed("selected", selectedNode && d.id === selectedNode.id);
-        el.select("text.node-label").style("opacity", matchesType ? (d.kind === 'File' ? 0.4 : 0.8) : 0.05);
-      });
+      nodeAll
+        .classed("fade", false)
+        .classed("selected", d => selectedNode && d.id === selectedNode.id);
 
       // Never restart physics after the first settle — clicking a node must not move the graph.
     }
 
     function highlightSelection() {
       nodesLayer.selectAll("g.node-g")
-        .classed("selected", d => selectedNode && d.id === selectedNode.id);
+        .classed("selected", d => selectedNode && d.id === selectedNode.id)
+        .select("text.node-label")
+        .style("opacity", d => d.isCluster || (selectedNode && d.id === selectedNode.id) ? 1 : 0)
+        .classed("active", d => selectedNode && d.id === selectedNode.id);
+
+      if (selectedNode && !selectedNode.isCluster) {
+        nodesLayer.selectAll("g.node-g").each(function(d) {
+          const el = d3.select(this);
+          const on = d.id === selectedNode.id;
+          el.select(".node-shape")
+            .attr("filter", on ? "url(#glow)" : null)
+            .attr("stroke-width", on ? 4 : (d.isCluster ? 2 : 1.5));
+        });
+      }
+    }
+
+    function nodeIsDrawn(id) {
+      return (projection.nodes || []).some(n => n.id === id);
+    }
+
+    function syncTabs() {
+      document.querySelectorAll('.tab').forEach(t => {
+        t.classList.toggle('active', t.dataset.view === currentView);
+      });
+    }
+
+    function revealOnGraph(node) {
+      if (!node || node.isCluster) return false;
+      if (nodeIsDrawn(node.id)) return false;
+      const dir = getDirectory(node);
+      if (dir) {
+        focusDir = dir;
+        currentView = 'overview';
+        syncTabs();
+        return true;
+      }
+      currentView = node.kind;
+      focusDir = null;
+      syncTabs();
+      return true;
+    }
+
+    function scrollListToSelected() {
+      const el = document.querySelector('#nodeList .node-item.selected');
+      if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
     }
 
     // Hover Highlight Spotlight Spotlight with hardware-accelerated transforms
@@ -360,13 +524,14 @@
       hoveredNode = isHover ? node : null;
 
       if (!isHover) {
-        // Reset all faded items
         nodesLayer.selectAll("g.node-g").classed("fade", false);
         linksLayer.selectAll("path.link")
           .classed("highlight", false)
           .classed("fade", false)
           .attr("marker-end", d => "url(#arrow-" + d.type + ")");
-        nodesLayer.selectAll("text.node-label").classed("active", false);
+        nodesLayer.selectAll("text.node-label")
+          .classed("active", false)
+          .style("opacity", d => d.isCluster || (selectedNode && d.id === selectedNode.id) ? 1 : 0);
         nodesLayer.selectAll(".node-shape")
           .attr("filter", null)
           .attr("transform", "scale(1)")
@@ -403,7 +568,8 @@
           .attr("filter", isHoverTarget ? "url(#glow)" : null);
 
         el.select("text.node-label")
-          .classed("active", isHoverTarget);
+          .classed("active", isHoverTarget)
+          .style("opacity", d.isCluster || matches ? (isHoverTarget ? 1 : (d.isCluster ? 1 : 0.9)) : 0);
       });
 
       linksLayer.selectAll("path.link").each(function(d) {
@@ -456,18 +622,58 @@
 
     // Select a node in place — do not pan, zoom, or restart layout.
     async function selectNode(id) {
-      selectedNode = allNodes.find(n => n.id === id) || null;
-
-      renderNodeList(document.getElementById('search').value);
-      highlightSelection();
+      selectedNode = (projection.nodes || []).find(n => n.id === id)
+        || allNodes.find(n => n.id === id)
+        || null;
 
       if (!selectedNode) {
+        renderNodeList(document.getElementById('search').value);
+        highlightSelection();
         document.getElementById('detail-panel').classList.remove('open');
         pulsesLayer.selectAll("circle.pulse-dot").remove();
         return;
       }
 
+      if (revealOnGraph(selectedNode)) {
+        refreshGraph(true);
+      }
+
+      renderNodeList(document.getElementById('search').value);
+      highlightSelection();
+      scrollListToSelected();
+
+      if (selectedNode.isCluster) {
+        showClusterDetail(selectedNode);
+        return;
+      }
       showDetail(selectedNode);
+    }
+
+    function showClusterDetail(cluster) {
+      const panel = d3.select("#detail-panel");
+      const content = document.getElementById('detailContent');
+      panel.classed("open", true);
+      const members = (cluster.members || []).slice().sort((a, b) => (a.kind + a.name).localeCompare(b.kind + b.name));
+      let html = '<span class="node-kind-badge">PACKAGE</span>';
+      html += '<h1 style="font-family:Cinzel Decorative,serif;font-size:20px;margin-top:12px;color:' + getNodeColor(cluster) + ';">' + cluster.name + '</h1>';
+      html += '<p style="color:var(--text-muted);font-size:12px;margin:8px 0 16px;">' + cluster.memberCount + ' symbols in this area</p>';
+      html += '<button type="button" id="open-cluster" style="cursor:pointer;background:var(--primary);color:#fff;border:none;border-radius:6px;padding:8px 12px;font-weight:700;">Open this package</button>';
+      html += '<div class="detail-section"><div class="section-title">Inside</div>';
+      members.slice(0, 40).forEach(m => {
+        html += '<div class="neighbor-item" onclick="selectNode(\'' + String(m.id).replace(/'/g, "\\'") + '\')">';
+        html += '<div><span style="font-weight:600;color:' + getNodeColor(m) + ';">' + m.name + '</span>';
+        html += '<div style="font-size:10px;color:var(--text-muted);">' + (m.path || m.kind) + '</div></div>';
+        html += '<div style="font-size:10px;color:var(--text-muted);">' + m.kind + '</div></div>';
+      });
+      html += '</div>';
+      content.innerHTML = html;
+      const btn = document.getElementById('open-cluster');
+      if (btn) btn.onclick = () => {
+        focusDir = cluster.path;
+        currentView = 'overview';
+        refreshGraph(true);
+        renderNodeList();
+      };
     }
 
     // Fetch and show deep analysis report
@@ -700,14 +906,15 @@
       const list = document.getElementById('nodeList');
       const activeKind = currentView;
       
-      const filtered = allNodes.filter(n => {
-        const matchesKind = activeKind === 'all' || n.kind === activeKind;
-        const matchesSearch = !query || n.name.toLowerCase().includes(query.toLowerCase()) || n.id.toLowerCase().includes(query.toLowerCase());
+      const pool = query ? allNodes : visibleNodes();
+      const filtered = pool.filter(n => {
+        const matchesKind = currentView === 'overview' || currentView === 'all' || n.kind === currentView;
+        const matchesSearch = !query || n.name.toLowerCase().includes(query.toLowerCase()) || n.id.toLowerCase().includes(query.toLowerCase()) || (n.path || '').toLowerCase().includes(query.toLowerCase());
         return matchesKind && matchesSearch;
       });
 
       list.innerHTML = filtered.slice(0, 150).map(n => `
-        <li class="node-item ${selectedNode?.id === n.id ? 'selected' : ''}" onclick="selectNode('${n.id}')">
+        <li class="node-item ${selectedNode?.id === n.id ? 'selected' : ''}" data-id="${String(n.id).replace(/"/g, '&quot;')}">
           <div class="node-header-row">
             <span class="node-name" style="color: ${getNodeColor(n)}">${n.name}</span>
             <span class="node-kind-badge">${n.kind.slice(0,4)}</span>
@@ -715,6 +922,7 @@
           <div class="node-path-row">${n.path || n.id}</div>
         </li>
       `).join('');
+      scrollListToSelected();
     }
 
     function initEvents() {
@@ -725,6 +933,13 @@
         pulsesLayer.selectAll("circle.pulse-dot").remove();
         highlightSelection();
         renderNodeList(document.getElementById('search').value);
+      });
+
+      document.getElementById('nodeList').addEventListener('click', (e) => {
+        const li = e.target.closest('li.node-item');
+        if (!li) return;
+        const id = li.getAttribute('data-id');
+        if (id) selectNode(id);
       });
 
       // Interactive real-time search
@@ -740,16 +955,9 @@
         document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
         tab.classList.add('active');
         currentView = tab.dataset.view;
-        
+        if (currentView !== 'overview') focusDir = null;
         renderNodeList(document.getElementById('search').value);
-        
-        const nodeIds = new Set(allNodes.map(n => n.id));
-        const validEdges = allEdges.filter(e => {
-          const fromId = typeof e.from === 'object' ? e.from.id : e.from;
-          const toId = typeof e.to === 'object' ? e.to.id : e.to;
-          return nodeIds.has(fromId) && nodeIds.has(toId);
-        });
-        updateGraphVisuals(validEdges);
+        refreshGraph(true);
       });
     }
 
