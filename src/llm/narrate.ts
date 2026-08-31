@@ -1,69 +1,84 @@
 // Optional intelligence layer. Never invents graph edges or node IDs.
-// Works with no LLM configured. When configured, rewrites the deterministic
-// explanation using only names already in the payload.
+// Works with no LLM configured. When configured, rewrites text using only
+// names already in the payload.
 
-import type { Explanation, ImpactResult } from '../core/types.js';
+import type { Explanation, ImpactResult, LLMUsage } from '../core/types.js';
+import { chatComplete, loadLLMConfig } from './client.js';
+
+function allowedNames(impact: ImpactResult, extra: string[] = []): Set<string> {
+  return new Set<string>([
+    ...impact.nodes.map(n => n.name),
+    ...impact.startIds,
+    ...extra,
+  ]);
+}
+
+function leakedUnknown(text: string, allowed: Set<string>): string[] {
+  return [...text.matchAll(/\b[A-Z][A-Za-z0-9_]{3,}\b/g)]
+    .map(m => m[0])
+    .filter(w => !allowed.has(w) && !['Changing', 'This', 'There', 'None', 'True', 'False', 'JSON'].includes(w));
+}
 
 export async function narrateImpact(
   explanation: Explanation,
-  impact: ImpactResult
-): Promise<Explanation> {
-  const baseUrl = process.env.ARCHMAP_LLM_BASE_URL;
-  const apiKey = process.env.ARCHMAP_LLM_API_KEY;
-  const model = process.env.ARCHMAP_LLM_MODEL ?? 'grok-4';
-  if (!baseUrl || !apiKey) return explanation;
+  impact: ImpactResult,
+): Promise<{ explanation: Explanation; usage?: LLMUsage }> {
+  const cfg = loadLLMConfig();
+  if (!cfg.configured) return { explanation };
 
-  const allowed = new Set<string>([
-    ...impact.nodes.map(n => n.name),
-    ...impact.startIds,
-  ]);
-
-  const body = {
-    model,
+  const allowed = allowedNames(impact);
+  const result = await chatComplete({
+    model: cfg.cheapModel,
     temperature: 0,
+    maxTokens: 400,
     messages: [
       {
         role: 'system',
         content:
-          'You explain software change impact. Use only the provided component names. Do not invent APIs, tables, or services. Return 2-4 short sentences.',
+          'You explain software change impact for developers. Use ONLY the provided component names. Do not invent APIs, tables, services, or files. Return 2-4 short sentences. No markdown headings.',
       },
       {
         role: 'user',
         content: JSON.stringify({
           title: explanation.title,
           summary: explanation.summary,
-          paths: explanation.paths,
+          paths: explanation.paths.slice(0, 7),
           risks: explanation.risks,
           tests: explanation.tests,
           allowed_names: [...allowed].slice(0, 40),
         }),
       },
     ],
-  };
+  });
+  if (!result?.text) return { explanation };
+  if (leakedUnknown(result.text, allowed).length > 3) return { explanation };
+  return { explanation: { ...explanation, summary: result.text }, usage: result.usage };
+}
 
-  try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 8000);
-    const res = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${apiKey}`,
+export async function summarizeDocs(
+  targetName: string,
+  excerpts: Array<{ name: string; path?: string; text?: string }>,
+): Promise<{ summary: string; usage?: LLMUsage } | null> {
+  const cfg = loadLLMConfig();
+  if (!cfg.configured || excerpts.length === 0) return null;
+  const allowed = new Set(excerpts.flatMap(e => [e.name, targetName]));
+  const result = await chatComplete({
+    model: cfg.cheapModel,
+    temperature: 0,
+    maxTokens: 350,
+    messages: [
+      {
+        role: 'system',
+        content:
+          'Summarize retrieved documentation versus the named component. Never invent API parameters. If the text does not mention a parameter, do not claim it exists.',
       },
-      body: JSON.stringify(body),
-      signal: ctrl.signal,
-    });
-    clearTimeout(t);
-    if (!res.ok) return explanation;
-    const json = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
-    const text = json.choices?.[0]?.message?.content?.trim();
-    if (!text) return explanation;
-    const leaked = [...text.matchAll(/\b[A-Z][A-Za-z0-9_]+\b/g)]
-      .map(m => m[0])
-      .filter(w => w.length > 3 && !allowed.has(w) && !['Changing', 'This', 'There'].includes(w));
-    if (leaked.length > 3) return explanation;
-    return { ...explanation, summary: text };
-  } catch {
-    return explanation;
-  }
+      {
+        role: 'user',
+        content: JSON.stringify({ target: targetName, docs: excerpts.slice(0, 6) }),
+      },
+    ],
+  });
+  if (!result?.text) return null;
+  if (leakedUnknown(result.text, allowed).length > 8) return null;
+  return { summary: result.text, usage: result.usage };
 }

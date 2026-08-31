@@ -15,13 +15,15 @@ import { findWhyPaths } from '../core/why.js';
 import { computeInsights } from '../core/insights.js';
 import { planChange } from '../core/plan.js';
 import { projectView } from '../core/views.js';
+import { agentDebate, agentRun, agentVerify, orchestrate, recordEvent, runSkill } from '../core/agent.js';
+import { routeTask } from '../llm/router.js';
 
 const DEFAULT_PORT = 3742;
 
 interface Route {
   method: string;
   path: string;
-  handler: (body: any, store: GraphStore) => any;
+  handler: (body: any, store: GraphStore) => any | Promise<any>;
 }
 
 const routes: Route[] = [
@@ -149,6 +151,48 @@ const routes: Route[] = [
     path: '/v1/view',
     handler: (body, store) => envelope(projectView(store, body.mode ?? 'height', body.focus)),
   },
+  {
+    method: 'POST',
+    path: '/v1/orchestrate',
+    handler: async (body, store) => envelope(await orchestrate(store, body.task ?? body.q ?? '', { repoPath: process.cwd() })),
+  },
+  {
+    method: 'POST',
+    path: '/v1/route',
+    handler: (body) => envelope(routeTask({ task: body.task ?? '', kind: body.kind, difficulty: body.difficulty })),
+  },
+  {
+    method: 'POST',
+    path: '/v1/agent_run',
+    handler: async (body, store) => envelope(await agentRun(store, body.task, body.contract ?? {}, process.cwd())),
+  },
+  {
+    method: 'POST',
+    path: '/v1/agent_verify',
+    handler: (body, store) => {
+      let plan;
+      if (body.target) {
+        const node = store.resolveNode(body.target);
+        if (node) plan = planChange(store, node);
+      }
+      return envelope(agentVerify(store, { changedFiles: body.changedFiles, claims: body.claims, plan: body.plan ?? plan }));
+    },
+  },
+  {
+    method: 'POST',
+    path: '/v1/agent_debate',
+    handler: async (body, store) => envelope(await agentDebate(store, body.proposals ?? [], body.evidence ?? [], process.cwd())),
+  },
+  {
+    method: 'POST',
+    path: '/v1/agent_skill',
+    handler: async (body, store) => envelope(await runSkill(store, body.skill, { ...(body.inputs ?? {}), id: body.id, q: body.q }, { repoPath: process.cwd() })),
+  },
+  {
+    method: 'POST',
+    path: '/v1/record_event',
+    handler: (body, store) => envelope(recordEvent(store, body, process.cwd())),
+  },
 ];
 
 function parseBody(req: IncomingMessage): Promise<any> {
@@ -201,7 +245,7 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<void> {
 
     try {
       const body = await parseBody(req);
-      const result = route.handler(body, store);
+      const result = await route.handler(body, store);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
     } catch (e: any) {

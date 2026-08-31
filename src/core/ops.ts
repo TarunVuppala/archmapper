@@ -26,7 +26,9 @@ import { RAGIndex } from './rag.js';
 import { verifyGraph } from './verify.js';
 import { resolveDocs } from './docs.js';
 import { computeDiffImpact, type DiffOptions } from './diff.js';
-import type { DiffImpactResult } from './types.js';
+import type { DiffImpactResult, PromptContract } from './types.js';
+import { agentDebate, agentRun, agentVerify, orchestrate, recordEvent, runSkill } from './agent.js';
+import { routeTask } from '../llm/router.js';
 
 export function resolve(store: GraphStore, idOrName: string): GraphNode | undefined {
   return store.resolveNode(idOrName);
@@ -133,6 +135,56 @@ export function docsOp(store: GraphStore, idOrName: string) {
 
 export function diffOp(store: GraphStore, options: DiffOptions = {}): CanonicalEnvelope<DiffImpactResult> {
   return envelope(computeDiffImpact(store, options));
+}
+
+export async function orchestrateOp(store: GraphStore, task: string, repoPath = '.') {
+  return envelope(await orchestrate(store, task, { repoPath }));
+}
+
+export async function agentRunOp(
+  store: GraphStore,
+  task: string,
+  contract: Partial<PromptContract> = {},
+  repoPath = '.',
+) {
+  return envelope(await agentRun(store, task, contract, repoPath));
+}
+
+export function agentVerifyOp(
+  store: GraphStore,
+  artifact: { changedFiles?: string[]; plan?: ChangePlan; claims?: string[] } = {},
+) {
+  return envelope(agentVerify(store, artifact));
+}
+
+export async function agentDebateOp(
+  store: GraphStore,
+  proposals: Array<{ id: string; title: string; body: string; assumptions?: string[] }>,
+  evidence: string[] = [],
+  repoPath = '.',
+) {
+  return envelope(await agentDebate(store, proposals, evidence, repoPath));
+}
+
+export async function agentSkillOp(
+  store: GraphStore,
+  skill: string,
+  inputs: Record<string, unknown> = {},
+  repoPath = '.',
+) {
+  return envelope(await runSkill(store, skill, inputs, { repoPath }));
+}
+
+export function routeOp(task: string, kind?: string) {
+  return envelope(routeTask({ task, kind: kind ?? 'orchestrate' }));
+}
+
+export function recordEventOp(
+  store: GraphStore,
+  input: { kind?: 'incident' | 'coverage' | 'otel' | 'stack'; from?: string; to?: string; message?: string; file?: string; line?: number },
+  repoPath = '.',
+) {
+  return envelope(recordEvent(store, input, repoPath));
 }
 
 export { mermaidFromView };

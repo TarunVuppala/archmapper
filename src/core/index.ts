@@ -19,6 +19,10 @@ export { identifyFromGraph } from './identify.js';
 export { loadSeed, applySeed, type SeedFile } from './seed.js';
 export { verifyGraph, verifyPlanEnvelope, verifyEvidenceSnippets } from './verify.js';
 export { resolveDocs } from './docs.js';
+export {
+  orchestrate, agentRun, agentVerify, agentDebate, runSkill, recordEvent,
+  buildContract, listSkills, resolveTarget, DEFAULT_BUDGET,
+} from './agent.js';
 export * from './ops.js';
 export * from './ids.js';
 export * from './types.js';

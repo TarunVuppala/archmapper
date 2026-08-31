@@ -371,6 +371,7 @@ export function parseSingleFile(repoPath: string, relPath: string): ParseResult 
     wildcardImports: [],
     instantiations: new Map(),
     funcDefs: [],
+    skip: maskEmbeddedLines(lines),
   };
 
   extractPass1(meta, [relPath], nodes, edges, now);

@@ -361,3 +361,130 @@ export interface VerificationResult {
     message: string;
   }>;
 }
+
+// ─── Agent layer ───────────────────────────────────────────────────────────────
+
+export type AgentRole =
+  | 'orchestrator'
+  | 'explorer'
+  | 'architect'
+  | 'impact-analyzer'
+  | 'implementer'
+  | 'reviewer'
+  | 'verifier'
+  | 'docs-agent'
+  | 'security-agent'
+  | 'test-agent'
+  | 'prompt-agent'
+  | 'cost-agent';
+
+export type RouteTier = 'deterministic' | 'cheap' | 'strong' | 'independent_verifier';
+
+export interface AgentBudget {
+  max_agents: number;
+  max_depth: number;
+  max_model_calls: number;
+  max_input_tokens: number;
+  max_output_tokens: number;
+  max_runtime_seconds: number;
+}
+
+export interface PromptContract {
+  task: string;
+  role: AgentRole;
+  goal: string;
+  context: Record<string, unknown>;
+  evidence: string[];
+  constraints: string[];
+  allowed_tools: string[];
+  allowed_files: string[];
+  forbidden_actions: string[];
+  output_schema: string;
+  success_criteria: string[];
+  verification: { independent: boolean; max_retries: number };
+  budget: AgentBudget;
+}
+
+export interface LLMUsage {
+  provider: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cached_input_tokens: number;
+  estimated_cost: number;
+  latency_ms: number;
+}
+
+export interface RouteDecision {
+  tier: RouteTier;
+  model: string | null;
+  reason: string;
+  use_llm: boolean;
+}
+
+export interface ContextPack {
+  task: string;
+  facts: string[];
+  evidence: Array<{ id: string; file?: string; line?: number; snippet?: string }>;
+  constraints: string[];
+  open_questions: string[];
+  artifacts: string[];
+}
+
+export interface CouplingHypothesis {
+  from: string;
+  to: string;
+  type: EdgeKind;
+  snippet: string;
+  file?: string;
+  line?: number;
+  confidence: number;
+  accepted: boolean;
+  reason: string;
+}
+
+export interface AgentSkillResult {
+  skill: string;
+  ok: boolean;
+  role: AgentRole;
+  data: unknown;
+  evidence_used: boolean;
+  llm_used: boolean;
+}
+
+export interface DebateProposal {
+  id: string;
+  title: string;
+  body: string;
+  assumptions?: string[];
+}
+
+export interface DebateResult {
+  ok: boolean;
+  winner: string | null;
+  rationale: string;
+  proposals: DebateProposal[];
+  critiques: Array<{ proposalId: string; failures: string[] }>;
+  evidence_checked: boolean;
+  llm_used: boolean;
+}
+
+export interface AgentRunResult {
+  run_id: string;
+  parent_run_id?: string;
+  agent: string;
+  role: AgentRole;
+  task: string;
+  contract: PromptContract;
+  status: 'completed' | 'failed' | 'blocked' | 'needs_human';
+  route: RouteDecision;
+  context: ContextPack;
+  skills: AgentSkillResult[];
+  artifact: Record<string, unknown>;
+  hypotheses: CouplingHypothesis[];
+  decisions: string[];
+  verification: VerificationResult;
+  usage: LLMUsage[];
+  open_questions: string[];
+  llm_configured: boolean;
+}

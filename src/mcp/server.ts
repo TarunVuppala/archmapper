@@ -13,6 +13,7 @@ import { findWhyPaths } from '../core/why.js';
 import { computeInsights } from '../core/insights.js';
 import { planChange } from '../core/plan.js';
 import { resolveDocs } from '../core/docs.js';
+import { agentDebate, agentRun, agentVerify, recordEvent, runSkill } from '../core/agent.js';
 
 const SERVER_NAME = 'architecture-mapper';
 const SERVER_VERSION = '0.1.0';
@@ -157,6 +158,81 @@ const TOOLS = [
       required: ['id'],
     },
   },
+  {
+    name: 'agent_run',
+    description: 'Run a bounded orchestrated agent workflow over the architecture graph',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        task: { type: 'string', description: 'Natural-language task' },
+        contract: { type: 'object', description: 'Optional prompt contract overrides' },
+      },
+      required: ['task'],
+    },
+  },
+  {
+    name: 'agent_verify',
+    description: 'Independently verify an agent artifact against the graph and mutation envelope',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        changedFiles: { type: 'array', items: { type: 'string' } },
+        claims: { type: 'array', items: { type: 'string' } },
+        target: { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'agent_debate',
+    description: 'Debate proposals using graph evidence (LLM optional)',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        proposals: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              title: { type: 'string' },
+              body: { type: 'string' },
+            },
+          },
+        },
+        evidence: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['proposals'],
+    },
+  },
+  {
+    name: 'agent_skill',
+    description: 'Run a single agent skill (impact-analysis, change-planning, code-review, ...)',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        skill: { type: 'string' },
+        id: { type: 'string' },
+        q: { type: 'string' },
+        inputs: { type: 'object' },
+      },
+      required: ['skill'],
+    },
+  },
+  {
+    name: 'record_event',
+    description: 'Upsert an incident/coverage/runtime event onto the one graph',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        kind: { type: 'string', enum: ['incident', 'coverage', 'otel', 'stack'] },
+        from: { type: 'string' },
+        to: { type: 'string' },
+        message: { type: 'string' },
+        file: { type: 'string' },
+        line: { type: 'number' },
+      },
+    },
+  },
 ];
 
 // ─── Request Handling ─────────────────────────────────────────────────────────
@@ -175,7 +251,7 @@ interface MCPResponse {
   error?: { code: number; message: string };
 }
 
-function handleRequest(req: MCPRequest, store: GraphStore): MCPResponse {
+async function handleRequest(req: MCPRequest, store: GraphStore): Promise<MCPResponse> {
   const respond = (result: any, error?: { code: number; message: string }): MCPResponse => ({
     jsonrpc: '2.0',
     id: req.id,
@@ -197,7 +273,7 @@ function handleRequest(req: MCPRequest, store: GraphStore): MCPResponse {
 
       case 'tools/call': {
         const { name, arguments: args } = req.params;
-        return respond(handleToolCall(name, args ?? {}, store));
+        return respond(await handleToolCall(name, args ?? {}, store));
       }
 
       default:
@@ -208,7 +284,7 @@ function handleRequest(req: MCPRequest, store: GraphStore): MCPResponse {
   }
 }
 
-function handleToolCall(name: string, args: any, store: GraphStore): any {
+async function handleToolCall(name: string, args: any, store: GraphStore): Promise<any> {
   switch (name) {
     case 'search': {
       const rag = new RAGIndex();
@@ -307,6 +383,40 @@ function handleToolCall(name: string, args: any, store: GraphStore): any {
       return { content: [{ type: 'text', text: JSON.stringify(envelope(computeInsights(store))) }] };
     }
 
+    case 'agent_run': {
+      const result = await agentRun(store, args.task, args.contract ?? {}, process.cwd());
+      return { content: [{ type: 'text', text: JSON.stringify(envelope(result)) }] };
+    }
+
+    case 'agent_verify': {
+      let plan;
+      if (args.target) {
+        const node = store.resolveNode(args.target);
+        if (node) plan = planChange(store, node);
+      }
+      const result = agentVerify(store, {
+        changedFiles: args.changedFiles,
+        claims: args.claims,
+        plan,
+      });
+      return { content: [{ type: 'text', text: JSON.stringify(envelope(result)) }] };
+    }
+
+    case 'agent_debate': {
+      const result = await agentDebate(store, args.proposals ?? [], args.evidence ?? [], process.cwd());
+      return { content: [{ type: 'text', text: JSON.stringify(envelope(result)) }] };
+    }
+
+    case 'agent_skill': {
+      const result = await runSkill(store, args.skill, { ...(args.inputs ?? {}), id: args.id, q: args.q }, { repoPath: process.cwd() });
+      return { content: [{ type: 'text', text: JSON.stringify(envelope(result)) }] };
+    }
+
+    case 'record_event': {
+      const result = recordEvent(store, args, process.cwd());
+      return { content: [{ type: 'text', text: JSON.stringify(envelope(result)) }] };
+    }
+
     default:
       return { content: [{ type: 'text', text: JSON.stringify(errorEnvelope(`Unknown tool: ${name}`)) }] };
   }
@@ -326,24 +436,25 @@ export function startMCPServer(): void {
   const store = new GraphStore(dbPath);
 
   let buffer = '';
+  let chain = Promise.resolve();
 
   process.stdin.setEncoding('utf-8');
   process.stdin.on('data', (chunk: string) => {
     buffer += chunk;
-
-    const lines = buffer.split('\n');
-    buffer = lines.pop() ?? '';
-
-    for (const line of lines) {
-      if (line.trim() === '') continue;
-      try {
-        const req: MCPRequest = JSON.parse(line);
-        const resp = handleRequest(req, store);
-        process.stdout.write(JSON.stringify(resp) + '\n');
-      } catch {
-        // Ignore malformed messages
+    chain = chain.then(async () => {
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        if (line.trim() === '') continue;
+        try {
+          const req: MCPRequest = JSON.parse(line);
+          const resp = await handleRequest(req, store);
+          process.stdout.write(JSON.stringify(resp) + '\n');
+        } catch {
+          // Ignore malformed messages
+        }
       }
-    }
+    });
   });
 
   process.stdin.on('end', () => {

@@ -27,6 +27,7 @@
     const nodesLayer = mainGroup.select("g#nodes-layer");
 
     let simulation, zoomBehavior;
+    let layoutFrozen = false;
 
     // Initialize application
     async function init() {
@@ -85,15 +86,18 @@
         const height = svgNode ? svgNode.clientHeight || svgNode.getBoundingClientRect().height : window.innerHeight;
         svg.call(zoomBehavior.transform, d3.zoomIdentity.translate(width / 2, height / 2).scale(0.8));
 
-        // 4. Set up Force Physics Simulation ("Flow Free" fluid physics)
+        // Force layout once, then freeze so clicks / the detail panel never scatter nodes.
         simulation = d3.forceSimulation(allNodes)
-          .velocityDecay(0.25) // Low friction for elegant floating momentum
-          .force("link", d3.forceLink(validEdges).id(d => d.id).distance(d => d.type === 'CONTAINS' ? 80 : 200).strength(0.15)) // Looser connections
-          .force("charge", d3.forceManyBody().strength(-500)) // Wide, unconstrained node repulsion
-          .force("x", d3.forceX(0).strength(0.03)) // Gentle axial gravity
-          .force("y", d3.forceY(0).strength(0.03))
-          .force("collision", d3.forceCollide().radius(d => getRadius(d) + 25)) // Expanded breathing buffer
-          .on("tick", ticked);
+          .velocityDecay(0.45)
+          .alphaDecay(0.06)
+          .alphaMin(0.001)
+          .force("link", d3.forceLink(validEdges).id(d => d.id).distance(d => d.type === 'CONTAINS' ? 70 : 140).strength(0.5))
+          .force("charge", d3.forceManyBody().strength(-160))
+          .force("x", d3.forceX(0).strength(0.06))
+          .force("y", d3.forceY(0).strength(0.06))
+          .force("collision", d3.forceCollide().radius(d => getRadius(d) + 14))
+          .on("tick", ticked)
+          .on("end", freezeLayout);
 
         // 5. Register Event Listeners
         initEvents();
@@ -108,6 +112,15 @@
           list.innerHTML = '<li style="padding: 12px; color: #ff5ca0; font-size:12px;">Crash: ' + err.message + '</li>';
         }
       }
+    }
+
+    function freezeLayout() {
+      layoutFrozen = true;
+      allNodes.forEach(n => {
+        n.fx = n.x;
+        n.fy = n.y;
+      });
+      if (simulation) simulation.stop();
     }
 
     function getRadius(d) {
@@ -330,11 +343,16 @@
         const el = d3.select(this);
         const matchesType = activeIds.has(d.id);
         el.classed("fade", !matchesType);
+        el.classed("selected", selectedNode && d.id === selectedNode.id);
         el.select("text.node-label").style("opacity", matchesType ? (d.kind === 'File' ? 0.4 : 0.8) : 0.05);
       });
 
-      // Restart force physics
-      simulation.alpha(0.3).restart();
+      // Never restart physics after the first settle — clicking a node must not move the graph.
+    }
+
+    function highlightSelection() {
+      nodesLayer.selectAll("g.node-g")
+        .classed("selected", d => selectedNode && d.id === selectedNode.id);
     }
 
     // Hover Highlight Spotlight Spotlight with hardware-accelerated transforms
@@ -417,9 +435,8 @@
         .remove();
     }
 
-    // Drag gestures callbacks for force-directed layout
+    // Drag moves only that node; the rest of the graph stays frozen.
     function dragstarted(event, d) {
-      if (!event.active) simulation.alphaTarget(0.1).restart();
       d.fx = d.x;
       d.fy = d.y;
     }
@@ -427,51 +444,29 @@
     function dragged(event, d) {
       d.fx = event.x;
       d.fy = event.y;
+      d.x = event.x;
+      d.y = event.y;
+      ticked();
     }
 
     function dragended(event, d) {
-      if (!event.active) simulation.alphaTarget(0);
-      d.fx = null;
-      d.fy = null;
+      d.fx = d.x;
+      d.fy = d.y;
     }
 
-    // Select code node, zoom to it, and fetch detailed dependencies
+    // Select a node in place — do not pan, zoom, or restart layout.
     async function selectNode(id) {
       selectedNode = allNodes.find(n => n.id === id) || null;
-      
-      // Highlight row selection in left sidebar
+
       renderNodeList(document.getElementById('search').value);
+      highlightSelection();
 
       if (!selectedNode) {
         document.getElementById('detail-panel').classList.remove('open');
-        updateGraphVisuals(allEdges);
+        pulsesLayer.selectAll("circle.pulse-dot").remove();
         return;
       }
 
-      // Smooth camera pan-and-center to targeted node
-      const width = svg.node().clientWidth || window.innerWidth - 360;
-      const height = svg.node().clientHeight || window.innerHeight;
-
-      svg.transition()
-        .duration(800)
-        .ease(d3.easeCubicInOut)
-        .call(
-          zoomBehavior.transform,
-          d3.zoomIdentity
-            .translate(width / 2, height / 2)
-            .scale(1.2)
-            .translate(-selectedNode.x, -selectedNode.y)
-        );
-
-      // Re-filter and update
-      const nodeIds = new Set(allNodes.map(n => n.id));
-      const validEdges = allEdges.filter(e => {
-        const fromId = typeof e.from === 'object' ? e.from.id : e.from;
-        const toId = typeof e.to === 'object' ? e.to.id : e.to;
-        return nodeIds.has(fromId) && nodeIds.has(toId);
-      });
-
-      updateGraphVisuals(validEdges);
       showDetail(selectedNode);
     }
 
@@ -558,7 +553,7 @@
 
             for (const item of group.items.slice(0, 6)) {
               const itemColor = getNodeColor({id: item.id, path: item.path, kind: group.kind});
-              html += `<div class="neighbor-item" onclick="selectNode(${item.id})">`;
+              html += `<div class="neighbor-item" onclick="selectNode('${String(item.id).replace(/'/g, "\\'")}')">`;
               html += '<div>';
               html += '<span style="font-weight:600; color:' + itemColor + ';">' + item.name + '</span>';
               if (item.path) html += '<div style="font-size:10px; color:var(--text-muted);">' + item.path + (item.startLine ? ':' + item.startLine : '') + '</div>';
@@ -650,7 +645,7 @@
             const arrowChar = isOutgoing ? '→' : '←';
 
             html += `
-              <div class="neighbor-item" onclick="selectNode('	ext${sideNode.id}')">
+              <div class="neighbor-item" onclick="selectNode('${String(sideNode.id).replace(/'/g, "\\'")}')">
                 <div>
                   <span style="font-weight:600; color:${getNodeColor(sideNode)};">${sideNode.name}</span>
                   <div style="font-size:10px; color:var(--text-muted);">${sideNode.kind}</div>
@@ -728,14 +723,8 @@
         selectedNode = null;
         document.getElementById('detail-panel').classList.remove('open');
         pulsesLayer.selectAll("circle.pulse-dot").remove();
-        
-        const nodeIds = new Set(allNodes.map(n => n.id));
-        const validEdges = allEdges.filter(e => {
-          const fromId = typeof e.from === 'object' ? e.from.id : e.from;
-          const toId = typeof e.to === 'object' ? e.to.id : e.to;
-          return nodeIds.has(fromId) && nodeIds.has(toId);
-        });
-        updateGraphVisuals(validEdges);
+        highlightSelection();
+        renderNodeList(document.getElementById('search').value);
       });
 
       // Interactive real-time search

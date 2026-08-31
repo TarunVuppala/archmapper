@@ -9,7 +9,11 @@ import {
   envelope,
   identifyFromGraph, loadSeed, explainImpact,
   whyPathOp, insightsOp, viewOp, planChangeOp, mermaidFromView, docsOp,
+  orchestrate, agentVerify, agentDebate, runSkill, listSkills, recordEvent,
 } from '../core/index.js';
+import { narrateImpact } from '../llm/narrate.js';
+import { isLLMConfigured } from '../llm/client.js';
+import { routeTask } from '../llm/router.js';
 import type { GraphNode, NodeKind } from '../core/types.js';
 import { quickPick } from './picker.js';
 
@@ -134,7 +138,7 @@ program.command('init [path]').description('Set up archmap for this project (run
   .option('--json', 'Output as JSON')
   .action(async (repoPath: string = '.', opts: any) => {
     const abs = resolve(repoPath); const dir = getArchmapDir(abs); const t0 = Date.now();
-    mkdirSync(dir, { recursive: true }); mkdirSync(join(dir, 'cache', 'docs'), { recursive: true }); mkdirSync(join(dir, 'public'), { recursive: true });
+    mkdirSync(dir, { recursive: true }); mkdirSync(join(dir, 'cache', 'docs'), { recursive: true }); mkdirSync(join(dir, 'public'), { recursive: true }); mkdirSync(join(dir, 'agent-runs'), { recursive: true });
     console.log(`\n🏗️  Setting up archmap for: ${basename(abs)}\n`);
     const store = new GraphStore(join(dir, 'index.db'));
     const { nodes, edges } = parseRepository(abs);
@@ -218,7 +222,7 @@ program.command('impact [thing]').alias('what-happens').description('What breaks
     const result = computeImpact(store, [node.id], { direction: opts.upstream ? 'upstream' : 'downstream', maxDepth: parseInt(opts.depth || '5', 10) });
     if (opts.json) output(envelope(result));
     else {
-      const explanation = explainImpact(store, result);
+      const { explanation } = await narrateImpact(explainImpact(store, result), result);
       console.log(`\n🎯 ${explanation.title}\n`);
       console.log(`   ${explanation.summary}\n`);
       console.log(prettyImpact(result));
@@ -428,6 +432,11 @@ STEP 4: Understand risk
    archmap tests             Which tests to run?
    archmap trace A B         Why are these connected?
 
+STEP 5: Agent workflows (LLM optional — set XAI_API_KEY)
+   archmap orchestrate "..." Bounded explore → impact → plan → verify
+   archmap route "..."       Cheap vs strong vs deterministic
+   archmap agent skill       List / run one skill
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 💡 Every command works without arguments —
@@ -573,6 +582,153 @@ program.command('add [path]').description('Import another repository into the cu
     new Journal(getArchmapDir('.')).append('add', payload);
     if (opts.json) output(envelope(payload));
     else console.log(`\n✅ Imported ${extra}\n   graph now: ${payload.nodes} nodes, ${payload.edges} edges\n`);
+    store.close();
+  });
+
+program.command('orchestrate <task>').description('Bounded, verified agent workflow over the graph')
+  .option('--json')
+  .action(async (task: string, opts: any = {}) => {
+    const store = openStore('.');
+    const result = await orchestrate(store, task, { repoPath: resolve('.') });
+    if (opts.json) output(envelope(result));
+    else {
+      console.log(`\n🎭 Orchestrate  ${result.status.toUpperCase()}  (${result.run_id})`);
+      console.log(`   route: ${result.route.tier}${result.route.model ? ` · ${result.route.model}` : ' · no LLM'}`);
+      console.log(`   ${result.route.reason}`);
+      if (!result.llm_configured) console.log('   ℹ️  LLM optional — set XAI_API_KEY (or ARCHMAP_LLM_API_KEY + ARCHMAP_LLM_BASE_URL)');
+      const target = result.artifact.target as { id: string; name: string } | null;
+      if (target) console.log(`   target: ${target.name}  (${target.id})`);
+      if (result.artifact.synthesis) console.log(`\n   ${result.artifact.synthesis}\n`);
+      console.log('   skills:');
+      for (const s of result.skills) console.log(`      ${s.ok ? '✓' : '✗'} ${s.skill}${s.llm_used ? '  (llm)' : ''}`);
+      if (result.hypotheses.length) {
+        console.log('\n   hypotheses (not graph edges):');
+        for (const h of result.hypotheses.slice(0, 5)) console.log(`      • ${h.from} -[${h.type}]-> ${h.to}  ${h.accepted ? '' : '(unverified)'}`);
+      }
+      if (result.open_questions.length) {
+        console.log('\n   questions (max 3):');
+        for (const q of result.open_questions.slice(0, 3)) console.log(`      ? ${q}`);
+      }
+      console.log(`\n   verification: ${result.verification.ok ? 'PASS' : 'FAIL'}`);
+      for (const c of result.verification.checks) console.log(`      ${c.passed ? '✓' : '✗'} ${c.name} — ${c.message}`);
+      console.log('');
+    }
+    store.close();
+  });
+
+program.command('route <task>').description('Capability/cost model route (no side effects)')
+  .option('--json')
+  .option('--kind <kind>', 'Task kind hint')
+  .action((task: string, opts: any = {}) => {
+    const decision = routeTask({ task, kind: opts.kind, difficulty: 'medium' });
+    if (opts.json) output(envelope({ ...decision, llm_configured: isLLMConfigured() }));
+    else {
+      console.log(`\n🧭 Route: ${decision.tier}`);
+      console.log(`   model: ${decision.model ?? '(none — deterministic)'}`);
+      console.log(`   ${decision.reason}`);
+      console.log(`   llm: ${isLLMConfigured() ? 'configured' : 'not configured'}\n`);
+    }
+  });
+
+const agentCmd = program.command('agent').description('Bounded AI agent commands (run / verify / debate / skill)');
+
+agentCmd.command('run <task>').description('Same as archmap orchestrate')
+  .option('--json')
+  .action(async (task: string, opts: any = {}) => {
+    const store = openStore('.');
+    const result = await orchestrate(store, task, { repoPath: resolve('.') });
+    if (opts.json) output(envelope(result));
+    else {
+      console.log(`\n🤖 agent run ${result.run_id}  ${result.status}`);
+      console.log(`   ${result.decisions.join('\n   ')}\n`);
+    }
+    store.close();
+  });
+
+agentCmd.command('verify').description('Independently verify an artifact / envelope')
+  .option('--json')
+  .option('--files <csv>', 'Changed files to check against a plan')
+  .option('--claims <csv>', 'Node IDs an agent claimed')
+  .option('--target <id>', 'Build a plan for this target and verify it')
+  .action((opts: any = {}) => {
+    const store = openStore('.');
+    const changedFiles = opts.files ? String(opts.files).split(',').map((s: string) => s.trim()).filter(Boolean) : [];
+    const claims = opts.claims ? String(opts.claims).split(',').map((s: string) => s.trim()).filter(Boolean) : [];
+    let plan;
+    if (opts.target) {
+      const node = findNode(store, opts.target);
+      if (node) plan = (planChangeOp(store, node.id).data as any);
+    }
+    const result = agentVerify(store, { changedFiles, claims, plan: plan && 'allowedFiles' in plan ? plan : undefined });
+    if (opts.json) output(envelope(result));
+    else {
+      console.log(`\n🔎 Verify  ${result.ok ? 'PASS' : 'BLOCKED'}\n`);
+      for (const c of result.checks) console.log(`   ${c.passed ? '✓' : '✗'} ${c.name} — ${c.message}`);
+      console.log('');
+    }
+    store.close();
+  });
+
+agentCmd.command('debate [a] [b]').description('Evidence-backed debate between two proposals')
+  .option('--json')
+  .action(async (a?: string, b?: string, opts: any = {}) => {
+    if (!a || !b) { console.log('\nUsage: archmap agent debate "option A" "option B"\n'); return; }
+    const store = openStore('.');
+    const result = await agentDebate(store, [
+      { id: 'A', title: 'A', body: a },
+      { id: 'B', title: 'B', body: b },
+    ], [], resolve('.'));
+    if (opts.json) output(envelope(result));
+    else {
+      console.log(`\n⚖️  Debate winner: ${result.winner ?? 'none'}`);
+      console.log(`   ${result.rationale}`);
+      for (const c of result.critiques) {
+        if (c.failures.length) console.log(`   ${c.proposalId}: ${c.failures.join('; ')}`);
+      }
+      console.log('');
+    }
+    store.close();
+  });
+
+agentCmd.command('skill [name]').description('Run one agent skill (omit name to list)')
+  .option('--json')
+  .option('--id <id>', 'Target node')
+  .option('--q <q>', 'Search query')
+  .action(async (name?: string, opts: any = {}) => {
+    if (!name) {
+      const skills = listSkills();
+      if (opts.json) output(envelope({ skills }));
+      else {
+        console.log('\n🧩 Skills\n');
+        for (const s of skills) console.log(`   ${s.name.padEnd(24)} ${s.role}  — ${s.description}`);
+        console.log('');
+      }
+      return;
+    }
+    const store = openStore('.');
+    const result = await runSkill(store, name, { id: opts.id, q: opts.q, task: opts.q }, { repoPath: resolve('.') });
+    if (opts.json) output(envelope(result));
+    else {
+      console.log(`\n🧩 ${result.skill}  ${result.ok ? 'ok' : 'fail'}${result.llm_used ? '  (llm)' : ''}\n`);
+      console.log(JSON.stringify(result.data, null, 2).split('\n').slice(0, 40).map(l => '   ' + l).join('\n'));
+      console.log('');
+    }
+    store.close();
+  });
+
+agentCmd.command('record').description('Record an incident/coverage/runtime event onto the graph')
+  .option('--json')
+  .option('--kind <kind>', 'incident|coverage|otel|stack', 'incident')
+  .option('--from <id>')
+  .option('--to <id>')
+  .option('--message <text>')
+  .action((opts: any = {}) => {
+    const store = openStore('.');
+    const result = recordEvent(store, {
+      kind: opts.kind, from: opts.from, to: opts.to, message: opts.message,
+    }, resolve('.'));
+    if (opts.json) output(envelope(result));
+    else console.log(`\n📌 recorded ${opts.kind}${result.edge ? ' (edge upserted)' : ''}\n`);
     store.close();
   });
 

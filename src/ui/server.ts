@@ -319,6 +319,14 @@ function getHTML(): string {
     .node-g.fade {
       opacity: 0.08;
     }
+    .node-g.selected .node-shape {
+      stroke: #ffffff;
+      stroke-width: 3px;
+    }
+    .node-g.selected text.node-label {
+      fill: #ffffff;
+      opacity: 1;
+    }
 
     .node-label {
       font-size: 10px;
